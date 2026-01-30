@@ -2,6 +2,7 @@ package com.buuz135.simpleclaims.files;
 
 import com.buuz135.simpleclaims.claim.chunk.ChunkInfo;
 import com.buuz135.simpleclaims.claim.tracking.ModifiedTracking;
+import com.buuz135.simpleclaims.constants.ClaimOwnerType;
 import com.buuz135.simpleclaims.util.FileUtils;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
@@ -40,11 +41,23 @@ public class ClaimedChunkBlockingFile extends BlockingDiskFile {
             if (chunkInfoArray != null) {
                 chunkInfoArray.forEach(chunkElement -> {
                     JsonObject chunkObj = chunkElement.getAsJsonObject();
+
+                    // Получаем ownerType (для обратной совместимости со старыми файлами)
+                    ClaimOwnerType ownerType = ClaimOwnerType.PARTY; // дефолт для старых записей
+                    if (chunkObj.has("OwnerType")) {
+                        String ownerTypeStr = chunkObj.get("OwnerType").getAsString();
+                        ownerType = ClaimOwnerType.fromString(ownerTypeStr);
+                    }
+
+                    // Создаём ChunkInfo с новым конструктором
                     ChunkInfo chunkInfo = new ChunkInfo(
                             UUID.fromString(chunkObj.get("UUID").getAsString()),
+                            ownerType,
                             chunkObj.get("ChunkX").getAsInt(),
-                            chunkObj.get("ChunkY").getAsInt()
+                            chunkObj.get("ChunkY").getAsInt() // ChunkY = ChunkZ для совместимости
                     );
+
+                    // Загружаем CreatedTracker если есть
                     if (chunkObj.has("CreatedTracker")) {
                         JsonObject trackerObj = chunkObj.getAsJsonObject("CreatedTracker");
                         chunkInfo.setCreatedTracked(new ModifiedTracking(
@@ -70,9 +83,18 @@ public class ClaimedChunkBlockingFile extends BlockingDiskFile {
             JsonArray chunkInfoArray = new JsonArray();
             chunkMap.values().forEach(chunkInfo -> {
                 JsonObject chunkObj = new JsonObject();
-                chunkObj.addProperty("UUID", chunkInfo.getPartyOwner().toString());
+
+                // Сохраняем ownerId (используем новый метод)
+                chunkObj.addProperty("UUID", chunkInfo.getOwnerId().toString());
+
+                // Сохраняем ownerType (НОВОЕ ПОЛЕ)
+                chunkObj.addProperty("OwnerType", chunkInfo.getOwnerType().name());
+
+                // Координаты (ChunkY = ChunkZ для совместимости)
                 chunkObj.addProperty("ChunkX", chunkInfo.getChunkX());
                 chunkObj.addProperty("ChunkY", chunkInfo.getChunkZ());
+
+                // CreatedTracker
                 if (chunkInfo.getCreatedTracked() != null) {
                     JsonObject trackerObj = new JsonObject();
                     trackerObj.addProperty("UserUUID", chunkInfo.getCreatedTracked().getUserUUID().toString());

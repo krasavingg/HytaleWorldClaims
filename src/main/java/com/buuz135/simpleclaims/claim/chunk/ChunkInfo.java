@@ -1,21 +1,24 @@
 package com.buuz135.simpleclaims.claim.chunk;
 
 import com.buuz135.simpleclaims.claim.tracking.ModifiedTracking;
+import com.buuz135.simpleclaims.constants.ClaimOwnerType;
 import com.hypixel.hytale.codec.Codec;
 import com.hypixel.hytale.codec.KeyedCodec;
 import com.hypixel.hytale.codec.builder.BuilderCodec;
 import com.hypixel.hytale.codec.codecs.array.ArrayCodec;
 
 import java.time.LocalDateTime;
-import java.time.LocalTime;
 import java.util.UUID;
 
 public class ChunkInfo {
 
     public static final BuilderCodec<ChunkInfo> CODEC = BuilderCodec.<ChunkInfo>builder(ChunkInfo.class, ChunkInfo::new)
             .append(new KeyedCodec<>("UUID", Codec.UUID_STRING),
-                    (chunkInfo, uuid, extraInfo) -> chunkInfo.setPartyOwner(uuid),
-                    (chunkInfo, extraInfo) -> chunkInfo.getPartyOwner()).add()
+                    (chunkInfo, uuid, extraInfo) -> chunkInfo.setOwnerId(uuid),
+                    (chunkInfo, extraInfo) -> chunkInfo.getOwnerId()).add()
+            .append(new KeyedCodec<>("OwnerType", Codec.STRING),
+                    (chunkInfo, value, extraInfo) -> chunkInfo.setOwnerType(ClaimOwnerType.fromString(value)),
+                    (chunkInfo, extraInfo) -> chunkInfo.getOwnerType().name()).add()
             .append(new KeyedCodec<>("ChunkX", Codec.INTEGER),
                     (chunkInfo, value, extraInfo) -> chunkInfo.setChunkX(value),
                     (chunkInfo, extraInfo) -> chunkInfo.getChunkX()).add()
@@ -32,28 +35,40 @@ public class ChunkInfo {
         return chunkX + ":" + chunkZ;
     }
 
-    private UUID partyOwner;
+    private UUID ownerId; // ID владельца (Player/Party/Guild)
+    private ClaimOwnerType ownerType; // Тип владельца
     private int chunkX;
     private int chunkZ;
     private ModifiedTracking createdTracked;
 
-    public ChunkInfo(UUID partyOwner, int chunkX, int chunkZ) {
-        this.partyOwner = partyOwner;
+    public ChunkInfo(UUID ownerId, ClaimOwnerType ownerType, int chunkX, int chunkZ) {
+        this.ownerId = ownerId;
+        this.ownerType = ownerType != null ? ownerType : ClaimOwnerType.PARTY; // дефолт для обратной совместимости
         this.chunkX = chunkX;
         this.chunkZ = chunkZ;
         this.createdTracked = new ModifiedTracking(UUID.randomUUID(), "-", LocalDateTime.now().toString());
     }
 
     public ChunkInfo() {
-        this(UUID.randomUUID(), 0, 0);
+        this(UUID.randomUUID(), ClaimOwnerType.PARTY, 0, 0);
     }
 
-    public UUID getPartyOwner() {
-        return partyOwner;
+    // === ГЕТТЕРЫ И СЕТТЕРЫ ===
+
+    public UUID getOwnerId() {
+        return ownerId;
     }
 
-    public void setPartyOwner(UUID partyOwner) {
-        this.partyOwner = partyOwner;
+    public void setOwnerId(UUID ownerId) {
+        this.ownerId = ownerId;
+    }
+
+    public ClaimOwnerType getOwnerType() {
+        return ownerType;
+    }
+
+    public void setOwnerType(ClaimOwnerType ownerType) {
+        this.ownerType = ownerType;
     }
 
     public int getChunkX() {
@@ -83,6 +98,27 @@ public class ChunkInfo {
     public String getCoordinates() {
         return formatCoordinates(chunkX, chunkZ);
     }
+
+    // === LEGACY МЕТОДЫ ДЛЯ ОБРАТНОЙ СОВМЕСТИМОСТИ ===
+
+    /**
+     * @deprecated Используйте getOwnerId() вместе с getOwnerType()
+     */
+    @Deprecated
+    public UUID getPartyOwner() {
+        return ownerId;
+    }
+
+    /**
+     * @deprecated Используйте setOwnerId() вместе с setOwnerType()
+     */
+    @Deprecated
+    public void setPartyOwner(UUID partyOwner) {
+        this.ownerId = partyOwner;
+        this.ownerType = ClaimOwnerType.PARTY;
+    }
+
+    // === INNER CLASSES ===
 
     public static final class DimensionStorage {
 

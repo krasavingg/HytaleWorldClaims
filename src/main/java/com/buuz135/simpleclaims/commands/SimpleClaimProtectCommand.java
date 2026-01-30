@@ -4,6 +4,7 @@ import com.buuz135.simpleclaims.Main;
 import com.buuz135.simpleclaims.claim.ClaimManager;
 import com.buuz135.simpleclaims.commands.subcommand.chunk.ClaimChunkCommand;
 import com.buuz135.simpleclaims.commands.subcommand.chunk.UnclaimChunkCommand;
+import com.buuz135.simpleclaims.commands.subcommand.chunk.guild.ClaimModeCommand;
 import com.buuz135.simpleclaims.commands.subcommand.chunk.op.OpChunkGuiCommand;
 import com.buuz135.simpleclaims.commands.subcommand.chunk.op.OpClaimChunkCommand;
 import com.buuz135.simpleclaims.commands.subcommand.chunk.op.OpUnclaimChunkCommand;
@@ -34,6 +35,7 @@ public class SimpleClaimProtectCommand extends AbstractAsyncCommand {
 
         this.addSubCommand(new ClaimChunkCommand());
         this.addSubCommand(new UnclaimChunkCommand());
+        this.addSubCommand(new ClaimModeCommand());
 
         this.addSubCommand(new OpClaimChunkCommand());
         this.addSubCommand(new OpUnclaimChunkCommand());

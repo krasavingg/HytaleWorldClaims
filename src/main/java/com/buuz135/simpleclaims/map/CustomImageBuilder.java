@@ -4,10 +4,10 @@ import com.buuz135.simpleclaims.Main;
 import com.buuz135.simpleclaims.claim.ClaimManager;
 import com.buuz135.simpleclaims.claim.chunk.ChunkInfo;
 import com.buuz135.simpleclaims.claim.party.PartyInfo;
+import com.buuz135.simpleclaims.guild.GuildClaimBridge;
 import com.hypixel.hytale.component.Ref;
 import com.hypixel.hytale.math.util.ChunkUtil;
 import com.hypixel.hytale.protocol.packets.worldmap.MapImage;
-import com.hypixel.hytale.protocol.packets.worldmap.UpdateWorldMap;
 import com.hypixel.hytale.server.core.asset.type.blocktype.config.BlockType;
 import com.hypixel.hytale.server.core.asset.type.environment.config.Environment;
 import com.hypixel.hytale.server.core.asset.type.fluid.Fluid;
@@ -16,7 +16,7 @@ import com.hypixel.hytale.server.core.universe.world.chunk.ChunkColumn;
 import com.hypixel.hytale.server.core.universe.world.chunk.WorldChunk;
 import com.hypixel.hytale.server.core.universe.world.chunk.section.FluidSection;
 import com.hypixel.hytale.server.core.universe.world.storage.ChunkStore;
-
+import ru.hytaleworld.guild.util.Guild;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
@@ -269,19 +269,60 @@ public class CustomImageBuilder {
         int minBlockX = ChunkUtil.minBlock(chunkX);
         int minBlockZ = ChunkUtil.minBlock(chunkZ);
 
-        // CUSTOM CODE
-        var claimedChunk = ClaimManager.getInstance().getChunk(this.worldChunk.getWorld().getName(), this.worldChunk.getX(), this.worldChunk.getZ());
-        PartyInfo partyInfo = null;
+        // === CUSTOM CODE: GUILD SUPPORT ===
+        // Получаем информацию о владельце чанка
+        var claimedChunk = ClaimManager.getInstance().getChunk(
+                this.worldChunk.getWorld().getName(),
+                this.worldChunk.getX(),
+                this.worldChunk.getZ()
+        );
+
+        Integer chunkColor = null;
+        String chunkOwnerName = null;
+
         if (claimedChunk != null) {
-            partyInfo = ClaimManager.getInstance().getPartyById(claimedChunk.getPartyOwner());
+            switch (claimedChunk.getOwnerType()) {
+                case PARTY -> {
+                    PartyInfo partyInfo = ClaimManager.getInstance().getPartyById(claimedChunk.getOwnerId());
+                    if (partyInfo != null) {
+                        chunkColor = partyInfo.getColor();
+                        chunkOwnerName = partyInfo.getName();
+                    }
+                }
+
+                case GUILD -> {
+                    Guild guild = ClaimManager.getInstance().getGuildById(claimedChunk.getOwnerId());
+                    if (guild != null) {
+                        // Парсим цвет из HEX строки
+                        String colorStr = GuildClaimBridge.getChatColor(guild);
+                        if (colorStr != null && colorStr.startsWith("#")) {
+                            try {
+                                chunkColor = Integer.parseInt(colorStr.substring(1), 16);
+                            } catch (NumberFormatException e) {
+                                chunkColor = 0xFFAA00; // Оранжевый по умолчанию
+                            }
+                        } else {
+                            chunkColor = 0xFFAA00;
+                        }
+                        chunkOwnerName = GuildClaimBridge.getGuildName(guild);
+                    }
+                }
+
+                case PERSONAL -> {
+                    chunkColor = 0x00BFFF; // DeepSkyBlue
+                    chunkOwnerName = "Personal";
+                }
+            }
         }
+
+        // Получаем соседние чанки для отрисовки границ
         var nearbyChunks = new ChunkInfo[]{
                 ClaimManager.getInstance().getChunk(this.worldChunk.getWorld().getName(), this.worldChunk.getX(), this.worldChunk.getZ() + 1), //NORTH
                 ClaimManager.getInstance().getChunk(this.worldChunk.getWorld().getName(), this.worldChunk.getX(), this.worldChunk.getZ() - 1), //SOUTH
                 ClaimManager.getInstance().getChunk(this.worldChunk.getWorld().getName(), this.worldChunk.getX() + 1, this.worldChunk.getZ()), //EAST
                 ClaimManager.getInstance().getChunk(this.worldChunk.getWorld().getName(), this.worldChunk.getX() - 1, this.worldChunk.getZ()), //WEST
         };
-        //-
+        // === END CUSTOM CODE ===
 
         for(int ix = 0; ix < this.image.width; ++ix) {
             for(int iz = 0; iz < this.image.height; ++iz) {
@@ -305,6 +346,7 @@ public class CustomImageBuilder {
                 short southEast = this.neighborHeightSamples[(sampleZ + 2) * (this.sampleWidth + 2) + sampleX + 2];
                 float shade = shadeFromHeights(blockPixelX, blockPixelZ, blockPixelWidth, blockPixelHeight, height, north, south, west, east, northWest, northEast, southWest, southEast);
                 this.outColor.multiply(shade);
+
                 if (height < 320) {
                     int fluidId = this.fluidSamples[sampleIndex];
                     if (fluidId != 0) {
@@ -314,26 +356,31 @@ public class CustomImageBuilder {
                     }
                 }
 
-                //CUSTOM CODE
-                if (partyInfo != null) {
+                // === CUSTOM CODE: ПРИМЕНЕНИЕ ЦВЕТА КЛАЙМА ===
+                if (chunkColor != null) {
                     var isBorder = false;
                     var borderSize = 2;
-                    if ((ix <= borderSize && (nearbyChunks[3] == null || !nearbyChunks[3].getPartyOwner().equals(partyInfo.getId()))) //WEST
-                            || (ix >= this.image.width - borderSize - 1 && (nearbyChunks[2] == null || !nearbyChunks[2].getPartyOwner().equals(partyInfo.getId()))) //EAST
-                            || (iz <= borderSize && (nearbyChunks[1] == null || !nearbyChunks[1].getPartyOwner().equals(partyInfo.getId()))) // NORTH
-                            || (iz >= this.image.height - borderSize - 1 && (nearbyChunks[0] == null || !nearbyChunks[0].getPartyOwner().equals(partyInfo.getId())))) {
+
+                    // Проверяем, является ли текущий пиксель границей
+                    if ((ix <= borderSize && (nearbyChunks[3] == null || !isSameOwner(claimedChunk, nearbyChunks[3]))) // WEST
+                            || (ix >= this.image.width - borderSize - 1 && (nearbyChunks[2] == null || !isSameOwner(claimedChunk, nearbyChunks[2]))) // EAST
+                            || (iz <= borderSize && (nearbyChunks[1] == null || !isSameOwner(claimedChunk, nearbyChunks[1]))) // SOUTH (was NORTH)
+                            || (iz >= this.image.height - borderSize - 1 && (nearbyChunks[0] == null || !isSameOwner(claimedChunk, nearbyChunks[0])))) { // NORTH (was SOUTH)
                         isBorder = true;
                     }
-                    getForceBlockColor(blockId, partyInfo.getColor(), this.outColor, isBorder);
+
+                    getForceBlockColor(blockId, chunkColor, this.outColor, isBorder);
                 }
-                //-
+                // === END CUSTOM CODE ===
 
                 this.populateImageData(iz * this.image.width + ix, sampleX, sampleZ, minBlockX, minBlockZ);
             }
         }
 
-        if (partyInfo != null && Main.CONFIG.get().isRenderClaimNamesOnWorldMap()) {
-            String name = partyInfo.getName().toUpperCase();
+        // === CUSTOM CODE: ОТРИСОВКА НАЗВАНИЯ ВЛАДЕЛЬЦА ===
+        if (chunkColor != null && chunkOwnerName != null && Main.CONFIG.get().isRenderClaimNamesOnWorldMap()) {
+            String name = chunkOwnerName.toUpperCase();
+            // Тень (чёрная обводка)
             drawText(this.image, 1, 1, name, new Color(0, 0, 0, 255).pack());
             drawText(this.image, 1, 2, name, new Color(0, 0, 0, 255).pack());
             drawText(this.image, 1, 3, name, new Color(0, 0, 0, 255).pack());
@@ -342,8 +389,10 @@ public class CustomImageBuilder {
             drawText(this.image, 3, 1, name, new Color(0, 0, 0, 255).pack());
             drawText(this.image, 3, 2, name, new Color(0, 0, 0, 255).pack());
             drawText(this.image, 3, 3, name, new Color(0, 0, 0, 255).pack());
+            // Основной текст (белый)
             drawText(this.image, 2, 2, name, new Color(255, 255, 255, 255).pack());
         }
+        // === END CUSTOM CODE ===
 
         return this;
     }
@@ -411,9 +460,9 @@ public class CustomImageBuilder {
 
         float overlayAlpha = isBorder ? 0.75f : 0.4f;
 
-        outColor.r = (int) (outColor.r * (1 - overlayAlpha) + biomeTintR * overlayAlpha);
-        outColor.g = (int) (outColor.g * (1 - overlayAlpha) + biomeTintG * overlayAlpha);
-        outColor.b = (int) (outColor.b * (1 - overlayAlpha) + biomeTintB * overlayAlpha);
+        outColor.r = (int)(outColor.r * (1 - overlayAlpha) + biomeTintR * overlayAlpha);
+        outColor.g = (int)(outColor.g * (1 - overlayAlpha) + biomeTintG * overlayAlpha);
+        outColor.b = (int)(outColor.b * (1 - overlayAlpha) + biomeTintB * overlayAlpha);
         outColor.a = 255;
     }
 
@@ -448,7 +497,7 @@ public class CustomImageBuilder {
     }
 
     private void drawText(MapImage image, int x, int y, String text, int color) {
-        for (int i = 0; i < text.length(); i++) {
+        for(int i = 0; i < text.length(); i++) {
             drawChar(image, x + i * 4 + 4, y + 4, text.charAt(i), color);
         }
     }
@@ -456,8 +505,8 @@ public class CustomImageBuilder {
     private void drawChar(MapImage image, int x, int y, char c, int color) {
         if (c == ' ') return;
         byte[] glyph = getGlyph(c);
-        for (int gy = 0; gy < 5; gy++) {
-            for (int gx = 0; gx < 3; gx++) {
+        for(int gy = 0; gy < 5; gy++) {
+            for(int gx = 0; gx < 3; gx++) {
                 if (((glyph[gy] >> (2 - gx)) & 1) == 1) {
                     int px = x + gx;
                     int py = y + gy;
@@ -470,89 +519,67 @@ public class CustomImageBuilder {
     }
 
     private byte[] getGlyph(char c) {
-        switch (Character.toUpperCase(c)) {
-            case 'A':
-                return new byte[]{0b010, 0b101, 0b111, 0b101, 0b101};
-            case 'B':
-                return new byte[]{0b110, 0b101, 0b110, 0b101, 0b110};
-            case 'C':
-                return new byte[]{0b011, 0b100, 0b100, 0b100, 0b011};
-            case 'D':
-                return new byte[]{0b110, 0b101, 0b101, 0b101, 0b110};
-            case 'E':
-                return new byte[]{0b111, 0b100, 0b110, 0b100, 0b111};
-            case 'F':
-                return new byte[]{0b111, 0b100, 0b110, 0b100, 0b100};
-            case 'G':
-                return new byte[]{0b011, 0b100, 0b101, 0b101, 0b011};
-            case 'H':
-                return new byte[]{0b101, 0b101, 0b111, 0b101, 0b101};
-            case 'I':
-                return new byte[]{0b111, 0b010, 0b010, 0b010, 0b111};
-            case 'J':
-                return new byte[]{0b001, 0b001, 0b001, 0b101, 0b010};
-            case 'K':
-                return new byte[]{0b101, 0b101, 0b110, 0b101, 0b101};
-            case 'L':
-                return new byte[]{0b100, 0b100, 0b100, 0b100, 0b111};
-            case 'M':
-                return new byte[]{0b101, 0b111, 0b101, 0b101, 0b101};
-            case 'N':
-                return new byte[]{0b101, 0b111, 0b111, 0b101, 0b101};
-            case 'O':
-                return new byte[]{0b010, 0b101, 0b101, 0b101, 0b010};
-            case 'P':
-                return new byte[]{0b110, 0b101, 0b110, 0b100, 0b100};
-            case 'Q':
-                return new byte[]{0b010, 0b101, 0b101, 0b011, 0b001};
-            case 'R':
-                return new byte[]{0b110, 0b101, 0b110, 0b101, 0b101};
-            case 'S':
-                return new byte[]{0b011, 0b100, 0b010, 0b001, 0b110};
-            case 'T':
-                return new byte[]{0b111, 0b010, 0b010, 0b010, 0b010};
-            case 'U':
-                return new byte[]{0b101, 0b101, 0b101, 0b101, 0b111};
-            case 'V':
-                return new byte[]{0b101, 0b101, 0b101, 0b101, 0b010};
-            case 'W':
-                return new byte[]{0b101, 0b101, 0b101, 0b111, 0b101};
-            case 'X':
-                return new byte[]{0b101, 0b101, 0b010, 0b101, 0b101};
-            case 'Y':
-                return new byte[]{0b101, 0b101, 0b010, 0b010, 0b010};
-            case 'Z':
-                return new byte[]{0b111, 0b001, 0b010, 0b100, 0b111};
-            case ' ':
-                return new byte[]{0b000, 0b000, 0b000, 0b000, 0b000};
-            case '0':
-                return new byte[]{0b111, 0b101, 0b101, 0b101, 0b111};
-            case '1':
-                return new byte[]{0b010, 0b110, 0b010, 0b010, 0b111};
-            case '2':
-                return new byte[]{0b111, 0b001, 0b111, 0b100, 0b111};
-            case '3':
-                return new byte[]{0b111, 0b001, 0b111, 0b001, 0b111};
-            case '4':
-                return new byte[]{0b101, 0b101, 0b111, 0b001, 0b001};
-            case '5':
-                return new byte[]{0b111, 0b100, 0b111, 0b001, 0b111};
-            case '6':
-                return new byte[]{0b111, 0b100, 0b111, 0b101, 0b111};
-            case '7':
-                return new byte[]{0b111, 0b001, 0b001, 0b001, 0b001};
-            case '8':
-                return new byte[]{0b111, 0b101, 0b111, 0b101, 0b111};
-            case '9':
-                return new byte[]{0b111, 0b101, 0b111, 0b001, 0b001};
-            default:
-                return new byte[]{0b000, 0b000, 0b000, 0b000, 0b000};
+        switch(Character.toUpperCase(c)) {
+            case 'A': return new byte[]{0b010, 0b101, 0b111, 0b101, 0b101};
+            case 'B': return new byte[]{0b110, 0b101, 0b110, 0b101, 0b110};
+            case 'C': return new byte[]{0b011, 0b100, 0b100, 0b100, 0b011};
+            case 'D': return new byte[]{0b110, 0b101, 0b101, 0b101, 0b110};
+            case 'E': return new byte[]{0b111, 0b100, 0b110, 0b100, 0b111};
+            case 'F': return new byte[]{0b111, 0b100, 0b110, 0b100, 0b100};
+            case 'G': return new byte[]{0b011, 0b100, 0b101, 0b101, 0b011};
+            case 'H': return new byte[]{0b101, 0b101, 0b111, 0b101, 0b101};
+            case 'I': return new byte[]{0b111, 0b010, 0b010, 0b010, 0b111};
+            case 'J': return new byte[]{0b001, 0b001, 0b001, 0b101, 0b010};
+            case 'K': return new byte[]{0b101, 0b101, 0b110, 0b101, 0b101};
+            case 'L': return new byte[]{0b100, 0b100, 0b100, 0b100, 0b111};
+            case 'M': return new byte[]{0b101, 0b111, 0b101, 0b101, 0b101};
+            case 'N': return new byte[]{0b101, 0b111, 0b111, 0b101, 0b101};
+            case 'O': return new byte[]{0b010, 0b101, 0b101, 0b101, 0b010};
+            case 'P': return new byte[]{0b110, 0b101, 0b110, 0b100, 0b100};
+            case 'Q': return new byte[]{0b010, 0b101, 0b101, 0b011, 0b001};
+            case 'R': return new byte[]{0b110, 0b101, 0b110, 0b101, 0b101};
+            case 'S': return new byte[]{0b011, 0b100, 0b010, 0b001, 0b110};
+            case 'T': return new byte[]{0b111, 0b010, 0b010, 0b010, 0b010};
+            case 'U': return new byte[]{0b101, 0b101, 0b101, 0b101, 0b111};
+            case 'V': return new byte[]{0b101, 0b101, 0b101, 0b101, 0b010};
+            case 'W': return new byte[]{0b101, 0b101, 0b101, 0b111, 0b101};
+            case 'X': return new byte[]{0b101, 0b101, 0b010, 0b101, 0b101};
+            case 'Y': return new byte[]{0b101, 0b101, 0b010, 0b010, 0b010};
+            case 'Z': return new byte[]{0b111, 0b001, 0b010, 0b100, 0b111};
+            case ' ': return new byte[]{0b000, 0b000, 0b000, 0b000, 0b000};
+            case '0': return new byte[]{0b111, 0b101, 0b101, 0b101, 0b111};
+            case '1': return new byte[]{0b010, 0b110, 0b010, 0b010, 0b111};
+            case '2': return new byte[]{0b111, 0b001, 0b111, 0b100, 0b111};
+            case '3': return new byte[]{0b111, 0b001, 0b111, 0b001, 0b111};
+            case '4': return new byte[]{0b101, 0b101, 0b111, 0b001, 0b001};
+            case '5': return new byte[]{0b111, 0b100, 0b111, 0b001, 0b111};
+            case '6': return new byte[]{0b111, 0b100, 0b111, 0b101, 0b111};
+            case '7': return new byte[]{0b111, 0b001, 0b001, 0b001, 0b001};
+            case '8': return new byte[]{0b111, 0b101, 0b111, 0b101, 0b111};
+            case '9': return new byte[]{0b111, 0b101, 0b111, 0b001, 0b001};
+            default: return new byte[]{0b000, 0b000, 0b000, 0b000, 0b000};
         }
     }
 
     @Nonnull
     public static CompletableFuture<CustomImageBuilder> build(long index, int imageWidth, int imageHeight, World world) {
-        return CompletableFuture.completedFuture(new CustomImageBuilder(index, imageWidth, imageHeight, world)).thenCompose(CustomImageBuilder::fetchChunk).thenCompose((builder) -> builder != null ? builder.sampleNeighborsSync() : CompletableFuture.completedFuture(null)).thenApplyAsync((builder) -> builder != null ? builder.generateImageAsync() : null);
+        return CompletableFuture.completedFuture(new CustomImageBuilder(index, imageWidth, imageHeight, world))
+                .thenCompose(CustomImageBuilder::fetchChunk)
+                .thenCompose((builder) -> builder != null ? builder.sampleNeighborsSync() : CompletableFuture.completedFuture(null))
+                .thenApplyAsync((builder) -> builder != null ? builder.generateImageAsync() : null);
+    }
+
+    /**
+     * Вспомогательный метод: проверка, принадлежат ли два чанка одному владельцу
+     */
+    private static boolean isSameOwner(ChunkInfo chunk1, ChunkInfo chunk2) {
+        if (chunk1 == null || chunk2 == null) {
+            return false;
+        }
+
+        // Сравниваем тип владельца и ID владельца
+        return chunk1.getOwnerType() == chunk2.getOwnerType() &&
+                chunk1.getOwnerId().equals(chunk2.getOwnerId());
     }
 
     private static class Color {

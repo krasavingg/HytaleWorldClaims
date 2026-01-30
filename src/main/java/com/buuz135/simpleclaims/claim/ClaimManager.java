@@ -3,7 +3,9 @@ package com.buuz135.simpleclaims.claim;
 import com.buuz135.simpleclaims.Main;
 import com.buuz135.simpleclaims.claim.party.PartyInvite;
 import com.buuz135.simpleclaims.commands.CommandMessages;
+import com.buuz135.simpleclaims.constants.ClaimOwnerType;
 import com.buuz135.simpleclaims.files.*;
+import com.buuz135.simpleclaims.guild.GuildClaimBridge;
 import com.buuz135.simpleclaims.util.FileUtils;
 import com.buuz135.simpleclaims.claim.chunk.ChunkInfo;
 import com.buuz135.simpleclaims.claim.party.PartyInfo;
@@ -17,6 +19,7 @@ import com.hypixel.hytale.server.core.universe.Universe;
 import com.hypixel.hytale.server.core.universe.world.World;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import it.unimi.dsi.fastutil.longs.LongSet;
+import ru.hytaleworld.guild.util.Guild;
 
 import javax.annotation.Nullable;
 import java.awt.*;
@@ -27,6 +30,9 @@ import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Predicate;
 import java.util.logging.Level;
+
+import static com.buuz135.simpleclaims.constants.ClaimOwnerType.GUILD;
+import static com.buuz135.simpleclaims.constants.ClaimOwnerType.PERSONAL;
 
 public class ClaimManager {
 
@@ -44,6 +50,8 @@ public class ClaimManager {
     private Set<UUID> adminOverrides;
     private DatabaseManager databaseManager;
     private HashMap<String, LongSet> mapUpdateQueue;
+
+    private final Map<UUID, Integer> guildClaimCounts = new ConcurrentHashMap<>();
 
     public static ClaimManager getInstance() {
         return INSTANCE;
@@ -101,7 +109,13 @@ public class ClaimManager {
         this.chunks.putAll(this.databaseManager.loadClaims());
         for (HashMap<String, ChunkInfo> dimensionChunks : this.chunks.values()) {
             for (ChunkInfo chunk : dimensionChunks.values()) {
-                partyClaimCounts.merge(chunk.getPartyOwner(), 1, Integer::sum);
+                // Обновляем счетчик в зависимости от типа владельца
+                if (chunk.getOwnerType() == ClaimOwnerType.GUILD) {
+                    guildClaimCounts.merge(chunk.getOwnerId(), 1, Integer::sum);
+                } else {
+                    // Для PARTY и PERSONAL
+                    partyClaimCounts.merge(chunk.getOwnerId(), 1, Integer::sum);
+                }
             }
         }
 
@@ -199,18 +213,113 @@ public class ClaimManager {
         return this.getChunk(dimension, ChunkUtil.chunkCoordinate(blockX), ChunkUtil.chunkCoordinate(blockZ));
     }
 
-    public ChunkInfo claimChunkBy(String dimension, int chunkX, int chunkZ, PartyInfo partyInfo, Player owner, PlayerRef playerRef) {
-        var chunkInfo = new ChunkInfo(partyInfo.getId(), chunkX, chunkZ);
+    public ChunkInfo claimChunkBy(
+            String dimension,
+            int chunkX,
+            int chunkZ,
+            UUID ownerId,           // ИЗМЕНЕНО: передаём UUID владельца напрямую
+            ClaimOwnerType ownerType,
+            UUID claimerUUID,       // ДОБАВЛЕНО: кто создал клайм
+            String claimerName      // ДОБАВЛЕНО: имя создателя
+    ) {
+        var chunkInfo = new ChunkInfo(ownerId, ownerType, chunkX, chunkZ);
         var chunkDimension = this.chunks.computeIfAbsent(dimension, k -> new HashMap<>());
         chunkDimension.put(ChunkInfo.formatCoordinates(chunkX, chunkZ), chunkInfo);
-        chunkInfo.setCreatedTracked(new ModifiedTracking(playerRef.getUuid(), owner.getDisplayName(), LocalDateTime.now().toString()));
-        partyClaimCounts.merge(partyInfo.getId(), 1, Integer::sum);
+
+        // Трекинг создания
+        chunkInfo.setCreatedTracked(new ModifiedTracking(
+                claimerUUID,
+                claimerName,
+                LocalDateTime.now().toString()
+        ));
+
+        // Обновляем правильный счетчик
+        if (ownerType == ClaimOwnerType.GUILD) {
+            guildClaimCounts.merge(ownerId, 1, Integer::sum);
+        } else {
+            partyClaimCounts.merge(ownerId, 1, Integer::sum);
+        }
+
         this.databaseManager.saveClaim(dimension, chunkInfo);
         return chunkInfo;
     }
 
+    public ChunkInfo claimChunkByParty(
+            String dimension,
+            int chunkX,
+            int chunkZ,
+            PartyInfo partyInfo,
+            Player claimer,
+            PlayerRef claimerRef
+    ) {
+        return claimChunkBy(
+                dimension,
+                chunkX,
+                chunkZ,
+                partyInfo.getId(),          // Owner = Party ID
+                ClaimOwnerType.PARTY,
+                claimerRef.getUuid(),
+                claimer.getDisplayName()
+        );
+    }
+
+    /**
+     * Заклаймить чанк как Personal (на имя игрока)
+     */
+    public ChunkInfo claimChunkByPersonal(
+            String dimension,
+            int chunkX,
+            int chunkZ,
+            Player owner,
+            PlayerRef ownerRef
+    ) {
+        return claimChunkBy(
+                dimension,
+                chunkX,
+                chunkZ,
+                ownerRef.getUuid(),         // Owner = Player UUID
+                ClaimOwnerType.PERSONAL,
+                ownerRef.getUuid(),
+                owner.getDisplayName()
+        );
+    }
+
+    /**
+     * Заклаймить чанк для Guild
+     */
+    public ChunkInfo claimChunkByGuild(
+            String dimension,
+            int chunkX,
+            int chunkZ,
+            Guild guild,
+            UUID claimerPlayerId,
+            String claimerPlayerName
+    ) {
+        if (guild == null) {
+            return null;
+        }
+
+        return claimChunkBy(
+                dimension,
+                chunkX,
+                chunkZ,
+                guild.getData().getId(),    // Owner = Guild ID
+                ClaimOwnerType.GUILD,
+                claimerPlayerId,
+                claimerPlayerName
+        );
+    }
+
+    @Deprecated
     public ChunkInfo claimChunkByRawCoords(String dimension, int blockX, int blockZ, PartyInfo partyInfo, Player owner, PlayerRef playerRef) {
-        return this.claimChunkBy(dimension, ChunkUtil.chunkCoordinate(blockX), ChunkUtil.chunkCoordinate(blockZ), partyInfo, owner, playerRef);
+        return claimChunkByParty(
+                dimension,
+                ChunkUtil.chunkCoordinate(blockX),
+                ChunkUtil.chunkCoordinate(blockZ),
+                partyInfo,
+                owner,
+                playerRef
+        );
     }
 
     public boolean hasEnoughClaimsLeft(PartyInfo partyInfo) {
@@ -223,15 +332,112 @@ public class ClaimManager {
         return partyClaimCounts.getOrDefault(partyInfo.getId(), 0);
     }
 
-    public void unclaim(String dimension, int chunkX, int chunkZ) {
+    /**
+     * Проверка: может ли игрок снять этот клайм?
+     */
+    public boolean canPlayerUnclaimChunk(UUID playerUUID, ChunkInfo chunkInfo) {
+        if (chunkInfo == null) {
+            return false;
+        }
+
+        // Админ-овверрайд
+        if (adminOverrides.contains(playerUUID)) {
+            return true;
+        }
+
+        switch (chunkInfo.getOwnerType()) {
+            case PERSONAL -> {
+                // Только владелец может снять личный клайм
+                return chunkInfo.getOwnerId().equals(playerUUID);
+            }
+            case PARTY -> {
+                // Владелец party или член party
+                PartyInfo party = getPartyById(chunkInfo.getOwnerId());
+                if (party == null) {
+                    return false;
+                }
+                return party.isOwner(playerUUID) || party.isMember(playerUUID);
+            }
+            case GUILD -> {
+                // Проверка прав в гильдии
+                Guild guild = getGuildById(chunkInfo.getOwnerId());
+                if (guild == null) {
+                    return false;
+                }
+                return canGuildClaim(guild, playerUUID);
+            }
+            default -> {
+                return false;
+            }
+        }
+    }
+
+    /**
+     * Снять клайм с чанка
+     * @param dimension измерение
+     * @param chunkX координата X чанка
+     * @param chunkZ координата Z чанка
+     * @return true если клайм был снят, false если клайма не было
+     */
+    public boolean unclaim(String dimension, int chunkX, int chunkZ) {
         var chunkMap = this.chunks.get(dimension);
         if (chunkMap != null) {
             ChunkInfo removed = chunkMap.remove(ChunkInfo.formatCoordinates(chunkX, chunkZ));
             if (removed != null) {
-                partyClaimCounts.computeIfPresent(removed.getPartyOwner(), (k, v) -> v > 1 ? v - 1 : null);
+                // Обновляем счетчик в зависимости от типа владельца
+                if (removed.getOwnerType() == ClaimOwnerType.GUILD) {
+                    guildClaimCounts.computeIfPresent(removed.getOwnerId(), (k, v) -> v > 1 ? v - 1 : null);
+                } else {
+                    // Для PARTY и PERSONAL используем старый счетчик
+                    partyClaimCounts.computeIfPresent(removed.getPartyOwner(), (k, v) -> v > 1 ? v - 1 : null);
+                }
                 databaseManager.deleteClaim(dimension, chunkX, chunkZ);
+                return true;
             }
         }
+        return false;
+    }
+
+    /**
+     * Снять клайм с чанка с проверкой прав игрока
+     * @param dimension измерение
+     * @param chunkX координата X чанка
+     * @param chunkZ координата Z чанка
+     * @param playerUUID UUID игрока
+     * @return true если клайм был снят успешно, false если нет прав или клайма не существует
+     */
+    public boolean unclaimWithPermissionCheck(String dimension, int chunkX, int chunkZ, UUID playerUUID) {
+        ChunkInfo chunkInfo = getChunk(dimension, chunkX, chunkZ);
+
+        // Проверяем существование клайма
+        if (chunkInfo == null) {
+            return false;
+        }
+
+        // Проверяем права игрока
+        if (!canPlayerUnclaimChunk(playerUUID, chunkInfo)) {
+            return false;
+        }
+
+        // Снимаем клайм
+        return unclaim(dimension, chunkX, chunkZ);
+    }
+
+    /**
+     * Снять клайм с чанка по координатам блока с проверкой прав
+     * @param dimension измерение
+     * @param blockX координата X блока
+     * @param blockZ координата Z блока
+     * @param playerUUID UUID игрока
+     * @return true если клайм был снят успешно, false если нет прав или клайма не существует
+     */
+    public boolean unclaimRawCoordsWithPermissionCheck(String dimension, int blockX, int blockZ, UUID playerUUID) {
+        return unclaimWithPermissionCheck(
+                dimension,
+                ChunkUtil.chunkCoordinate(blockX),
+                ChunkUtil.chunkCoordinate(blockZ),
+                playerUUID
+        );
     }
 
     public void unclaimRawCoords(String dimension, int blockX, int blockZ){
@@ -265,6 +471,17 @@ public class ClaimManager {
 
     public Map<UUID, UUID> getAdminUsageParty() {
         return adminUsageParty;
+    }
+
+    /**
+     * Снять клайм админом (игнорирует проверки владельца)
+     * @param dimension измерение
+     * @param chunkX координата X чанка
+     * @param chunkZ координата Z чанка
+     * @return true если клайм был снят, false если клайма не было
+     */
+    public boolean unclaimByAdmin(String dimension, int chunkX, int chunkZ) {
+        return unclaim(dimension, chunkX, chunkZ);
     }
 
     public void invitePlayerToParty(PlayerRef recipient, PartyInfo partyInfo, PlayerRef sender) {
@@ -413,4 +630,224 @@ public class ClaimManager {
             disbandParty(party);
         }
     }
+
+    @Nullable
+    public Guild getGuildFromPlayer(UUID playerId) {
+        return GuildClaimBridge.getPlayerGuild(playerId);
+    }
+
+    /**
+     * Получить гильдию по ID
+     */
+    @Nullable
+    public Guild getGuildById(UUID guildId) {
+        return GuildClaimBridge.getGuildById(guildId);
+    }
+
+    /**
+     * Проверка: может ли игрок клаймить от имени гильдии?
+     */
+    public boolean canGuildClaim(Guild guild, UUID playerId) {
+        if (guild == null) {
+            return false;
+        }
+
+        // Проверка: гильдия не в черновике
+        if (GuildClaimBridge.isDraft(guild)) {
+            return false;
+        }
+
+        // Проверка прав (владелец или модератор)
+        return GuildClaimBridge.canManageClaims(guild, playerId);
+    }
+
+
+    /**
+     * Проверка прав на взаимодействие с Guild-чанком
+     */
+    private boolean isAllowedToInteractGuild(
+            UUID playerUUID,
+            ChunkInfo chunkInfo,
+            java.util.function.Predicate<Guild> interactMethod
+    ) {
+        // Админ-овверрайд
+        if (playerUUID != null && adminOverrides.contains(playerUUID)) {
+            return true;
+        }
+
+        // Получаем гильдию-владельца
+        Guild guild = getGuildById(chunkInfo.getOwnerId());
+        if (guild == null) {
+            // Гильдия не найдена (удалена?) - разрешаем взаимодействие
+            return true;
+        }
+
+        // Проверка через predicate (например, friendlyFire)
+        if (interactMethod.test(guild)) {
+            return true;
+        }
+
+        // Если playerUUID == null (например, взрыв) - запрещаем
+        if (playerUUID == null) {
+            return false;
+        }
+
+        // Проверка: игрок - член гильдии
+        return GuildClaimBridge.isMember(guild, playerUUID);
+    }
+
+    /**
+     * Расширенный метод isAllowedToInteract с поддержкой Guild
+     *
+     * ВАЖНО: Этот метод должен ЗАМЕНИТЬ существующий isAllowedToInteract в ClaimManager
+     */
+    public boolean isAllowedToInteractWithOwnerType(
+            UUID playerUUID,
+            String dimension,
+            int chunkX,
+            int chunkZ,
+            java.util.function.Predicate<PartyInfo> partyInteractMethod,
+            java.util.function.Predicate<Guild> guildInteractMethod
+    ) {
+        // Админ-овверрайд
+        if (playerUUID != null && adminOverrides.contains(playerUUID)) {
+            return true;
+        }
+
+        // Получаем чанк
+        var chunkInfo = getChunkRawCoords(dimension, chunkX, chunkZ);
+        if (chunkInfo == null) {
+            // Нет клайма - проверяем полную защиту мира
+            return !Arrays.asList(Main.CONFIG.get().getFullWorldProtection()).contains(dimension);
+        }
+
+        // Определяем тип владельца
+        ClaimOwnerType ownerType = chunkInfo.getOwnerType();
+
+        switch (ownerType) {
+            case PARTY -> {
+                // Старая логика для Party
+                var chunkParty = getPartyById(chunkInfo.getOwnerId());
+                if (chunkParty == null || partyInteractMethod.test(chunkParty)) {
+                    return true;
+                }
+
+                if (playerUUID == null) {
+                    return false;
+                }
+
+                if (chunkParty.getPlayerAllies().contains(playerUUID)) {
+                    return true;
+                }
+
+                var partyId = playerToParty.get(playerUUID);
+                if (partyId == null) {
+                    return false;
+                }
+
+                return chunkInfo.getOwnerId().equals(partyId) ||
+                        chunkParty.getPartyAllies().contains(partyId);
+            }
+
+            case GUILD -> {
+                // Новая логика для Guild
+                return isAllowedToInteractGuild(playerUUID, chunkInfo, guildInteractMethod);
+            }
+
+            case PERSONAL -> {
+                // Личный клайм
+                if (playerUUID == null) {
+                    return false;
+                }
+                return chunkInfo.getOwnerId().equals(playerUUID);
+            }
+
+            default -> {
+                return false;
+            }
+        }
+    }
+    /**
+     * Получить количество клаймов у гильдии
+     */
+    public int getGuildClaimCount(UUID guildId) {
+        return guildClaimCounts.getOrDefault(guildId, 0);
+    }
+
+    /**
+     * Проверка: может ли гильдия заклаймить ещё один чанк?
+     *
+     * ВАЖНО: Пока используем дефолтное значение из конфига
+     * В будущем можно добавить систему разрешений для гильдий
+     */
+    public boolean hasGuildEnoughClaimsLeft(Guild guild) {
+        if (guild == null) {
+            return false;
+        }
+
+        int currentAmount = getGuildClaimCount(guild.getData().getId());
+        int maxAmount = guild.getData().getChunksAvailable(); // TODO: добавить отдельный лимит для гильдий в конфиг
+
+        return currentAmount < maxAmount;
+    }
+
+    /**
+     * Удалить все клаймы гильдии
+     * Вызывается при расформировании гильдии
+     */
+    public void unclaimAllByGuild(UUID guildId) {
+        this.chunks.forEach((dimension, chunkInfos) -> {
+            chunkInfos.values().removeIf(chunkInfo -> {
+                boolean matches = chunkInfo.getOwnerType() == ClaimOwnerType.GUILD &&
+                        chunkInfo.getOwnerId().equals(guildId);
+
+                if (matches) {
+                    databaseManager.deleteClaim(dimension, chunkInfo.getChunkX(), chunkInfo.getChunkZ());
+                }
+
+                return matches;
+            });
+        });
+
+        guildClaimCounts.remove(guildId);
+    }
+
+    /**
+     * Очистка "осиротевших" Guild-клаймов
+     * Вызывается при старте сервера или периодически
+     */
+    public void cleanupOrphanedGuildClaims() {
+        logger.at(Level.INFO).log("Checking for orphaned guild claims...");
+
+        int removedCount = 0;
+
+        for (String dimension : this.chunks.keySet()) {
+            var chunkMap = this.chunks.get(dimension);
+            var iterator = chunkMap.entrySet().iterator();
+
+            while (iterator.hasNext()) {
+                var entry = iterator.next();
+                ChunkInfo chunkInfo = entry.getValue();
+
+                // Проверяем только Guild-клаймы
+                if (chunkInfo.getOwnerType() != ClaimOwnerType.GUILD) {
+                    continue;
+                }
+
+                // Проверяем существование гильдии
+                Guild guild = getGuildById(chunkInfo.getOwnerId());
+                if (guild == null) {
+                    // Гильдия не найдена - удаляем клайм
+                    iterator.remove();
+                    databaseManager.deleteClaim(dimension, chunkInfo.getChunkX(), chunkInfo.getChunkZ());
+                    removedCount++;
+                }
+            }
+        }
+
+        if (removedCount > 0) {
+            logger.at(Level.INFO).log("Removed " + removedCount + " orphaned guild claims");
+        }
+    }
+
 }

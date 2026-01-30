@@ -8,6 +8,7 @@ public class CommandMessages {
 
     public static String BASE_PERM = "simpleclaims.";
     public static String ADMIN_PERM = "simpleclaims.admin.";
+    public static String GUILD_PERM = "simpleclaims.guild.";
 
     public static final Message NOT_IN_A_PARTY = Message.translation("commands.errors.simpleclaims.playerNotInParty").color(Color.RED).bold(true);
     public static final Message IN_A_PARTY = Message.translation("commands.errors.simpleclaims.playerInParty").color(Color.RED).bold(true);

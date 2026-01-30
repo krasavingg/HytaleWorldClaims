@@ -10,6 +10,7 @@ import com.buuz135.simpleclaims.interactions.ClaimPickupBucketInteraction;
 import com.buuz135.simpleclaims.interactions.ClaimPlaceBucketInteraction;
 import com.buuz135.simpleclaims.interactions.ClaimUseBlockInteraction;
 import com.buuz135.simpleclaims.map.SimpleClaimsWorldMapProvider;
+import com.buuz135.simpleclaims.services.ClaimModeManager;
 import com.buuz135.simpleclaims.systems.events.*;
 import com.buuz135.simpleclaims.systems.tick.*;
 import com.buuz135.simpleclaims.util.PartyInactivityThread;
@@ -70,7 +71,7 @@ public class Main extends JavaPlugin {
         this.getCommandRegistry().registerCommand(new SimpleClaimsPartyCommand());
 
         IWorldMapProvider.CODEC.register(SimpleClaimsWorldMapProvider.ID, SimpleClaimsWorldMapProvider.class, SimpleClaimsWorldMapProvider.CODEC);
-
+        new ClaimModeManager();
         WindowPacketAdapters.install();
         ClaimManager.getInstance();
 

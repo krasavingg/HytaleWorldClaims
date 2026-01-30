@@ -128,6 +128,27 @@ public class SimpleClaimsConfig {
             .append(new KeyedCodec<Boolean>("NotifyPartyChatToggling", Codec.BOOLEAN),
                     (simpleClaimsConfig, value, extraInfo) -> simpleClaimsConfig.NotifyPartyChatToggling = value,
                     (simpleClaimsConfig, extraInfo) -> simpleClaimsConfig.NotifyPartyChatToggling).add()
+            .append(new KeyedCodec<Integer>("DefaultGuildClaimsAmount", Codec.INTEGER),
+                    (config, value, extraInfo) -> config.DefaultGuildClaimsAmount = value,
+                    (config, extraInfo) -> config.DefaultGuildClaimsAmount).add()
+            .append(new KeyedCodec<Integer>("MaxGuildClaimsAmount", Codec.INTEGER),
+                    (config, value, extraInfo) -> config.MaxGuildClaimsAmount = value,
+                    (config, extraInfo) -> config.MaxGuildClaimsAmount).add()
+            .append(new KeyedCodec<Boolean>("AllowGuildClaims", Codec.BOOLEAN),
+                    (config, value, extraInfo) -> config.AllowGuildClaims = value,
+                    (config, extraInfo) -> config.AllowGuildClaims).add()
+            .append(new KeyedCodec<Boolean>("AllowDraftGuildClaims", Codec.BOOLEAN),
+                    (config, value, extraInfo) -> config.AllowDraftGuildClaims = value,
+                    (config, extraInfo) -> config.AllowDraftGuildClaims).add()
+            .append(new KeyedCodec<String>("DefaultGuildClaimColor", Codec.STRING),
+                    (config, value, extraInfo) -> config.DefaultGuildClaimColor = value,
+                    (config, extraInfo) -> config.DefaultGuildClaimColor).add()
+            .append(new KeyedCodec<Boolean>("RemoveClaimsOnGuildDisband", Codec.BOOLEAN),
+                    (config, value, extraInfo) -> config.RemoveClaimsOnGuildDisband = value,
+                    (config, extraInfo) -> config.RemoveClaimsOnGuildDisband).add()
+            .append(new KeyedCodec<Boolean>("CheckOrphanedGuildClaimsOnStartup", Codec.BOOLEAN),
+                    (config, value, extraInfo) -> config.CheckOrphanedGuildClaimsOnStartup = value,
+                    (config, extraInfo) -> config.CheckOrphanedGuildClaimsOnStartup).add()
             .build();
 
     private String[] PartyCommandAliases = new String[]{"scp", "sc-party", "party"};
@@ -172,11 +193,61 @@ public class SimpleClaimsConfig {
     private boolean ForceSimpleClaimsChunkWorldMap = true;
     private boolean CreativeModeBypassProtection = false;
 
+    // Лимит клаймов для гильдий (по умолчанию)
+    private int DefaultGuildClaimsAmount = 50;
+
+    // Максимальный лимит клаймов для гильдий (через разрешения)
+    private int MaxGuildClaimsAmount = 500;
+
+    // Разрешить ли гильдиям клаймить территорию
+    private boolean AllowGuildClaims = true;
+
+    // Могут ли гильдии в статусе draft клаймить
+    private boolean AllowDraftGuildClaims = false;
+
+    // Цвет по умолчанию для Guild-клаймов (если не задан chatColor)
+    private String DefaultGuildClaimColor = "#FFAA00";
+
+    // Очищать ли клаймы при удалении гильдии
+    private boolean RemoveClaimsOnGuildDisband = true;
+
+    // Проверять ли orphaned guild claims при старте
+    private boolean CheckOrphanedGuildClaimsOnStartup = true;
+
     private String[] BlocksThatIgnoreInteractRestrictions = new String[]{"gravestone"};
 
     public SimpleClaimsConfig() {
 
     }
+
+    public int getDefaultGuildClaimsAmount() {
+        return DefaultGuildClaimsAmount;
+    }
+
+    public int getMaxGuildClaimsAmount() {
+        return MaxGuildClaimsAmount;
+    }
+
+    public boolean isAllowGuildClaims() {
+        return AllowGuildClaims;
+    }
+
+    public boolean isAllowDraftGuildClaims() {
+        return AllowDraftGuildClaims;
+    }
+
+    public String getDefaultGuildClaimColor() {
+        return DefaultGuildClaimColor;
+    }
+
+    public boolean isRemoveClaimsOnGuildDisband() {
+        return RemoveClaimsOnGuildDisband;
+    }
+
+    public boolean isCheckOrphanedGuildClaimsOnStartup() {
+        return CheckOrphanedGuildClaimsOnStartup;
+    }
+
 
     public String[] getPartyCommandAliases() {
         return PartyCommandAliases;

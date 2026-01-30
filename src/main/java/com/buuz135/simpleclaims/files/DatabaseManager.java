@@ -5,6 +5,7 @@ import com.buuz135.simpleclaims.claim.party.PartyInfo;
 import com.buuz135.simpleclaims.claim.party.PartyOverride;
 import com.buuz135.simpleclaims.claim.player_name.PlayerNameTracker;
 import com.buuz135.simpleclaims.claim.tracking.ModifiedTracking;
+import com.buuz135.simpleclaims.constants.ClaimOwnerType;
 import com.buuz135.simpleclaims.util.FileUtils;
 import com.hypixel.hytale.logger.HytaleLogger;
 
@@ -43,6 +44,8 @@ public class DatabaseManager {
                 statement.execute("PRAGMA foreign_keys = ON;");
             }
             createTables();
+            // ВАЖНО: Добавляем колонку owner_type если её нет
+            ensureOwnerTypeColumn();
         } catch (Exception e) {
             logger.at(Level.SEVERE).log("Error initializing database: " + e.getMessage());
             e.printStackTrace();
@@ -95,11 +98,13 @@ public class DatabaseManager {
                     "FOREIGN KEY (party_id) REFERENCES parties(id) ON DELETE CASCADE" +
                     ")");
 
+            // ИСПРАВЛЕНО: Добавлена колонка owner_type (будет добавлена в ensureOwnerTypeColumn если таблица уже существует)
             statement.execute("CREATE TABLE IF NOT EXISTS claims (" +
                     "dimension TEXT," +
                     "chunkX INTEGER," +
                     "chunkZ INTEGER," +
-                    "party_owner TEXT," +
+                    "owner_id TEXT," +  // ПЕРЕИМЕНОВАНО: было party_owner
+                    "owner_type TEXT DEFAULT 'PARTY'," + // ДОБАВЛЕНО: тип владельца
                     "created_user_uuid TEXT," +
                     "created_user_name TEXT," +
                     "created_date TEXT," +
@@ -117,6 +122,167 @@ public class DatabaseManager {
                     ")");
 
             addColumnIfNotExists("name_cache", "last_seen", "INTEGER DEFAULT " + System.currentTimeMillis());
+        }
+    }
+
+    /**
+     * НОВЫЙ МЕТОД: Добавляет колонку owner_type если её нет и мигрирует party_owner -> owner_id
+     */
+    private void ensureOwnerTypeColumn() {
+        try {
+            boolean hasOwnerType = false;
+            boolean hasOwnerId = false;
+            boolean hasPartyOwner = false;
+
+            // Проверяем какие колонки существуют
+            try (ResultSet rs = connection.getMetaData().getColumns(null, null, "claims", null)) {
+                while (rs.next()) {
+                    String columnName = rs.getString("COLUMN_NAME");
+                    if ("owner_type".equalsIgnoreCase(columnName)) {
+                        hasOwnerType = true;
+                    }
+                    if ("owner_id".equalsIgnoreCase(columnName)) {
+                        hasOwnerId = true;
+                    }
+                    if ("party_owner".equalsIgnoreCase(columnName)) {
+                        hasPartyOwner = true;
+                    }
+                }
+            }
+
+            // Если есть старая колонка party_owner, но нет новых - делаем УМНУЮ миграцию
+            if (hasPartyOwner && !hasOwnerId) {
+                logger.at(Level.INFO).log("============================================================");
+                logger.at(Level.INFO).log("Starting claims table migration: party_owner → owner_id + owner_type");
+                logger.at(Level.INFO).log("============================================================");
+
+                try (Statement stmt = connection.createStatement()) {
+                    // Получаем статистику ДО миграции
+                    ResultSet countBefore = stmt.executeQuery("SELECT COUNT(*) FROM claims");
+                    int totalClaims = countBefore.getInt(1);
+                    logger.at(Level.INFO).log("Total claims to migrate: " + totalClaims);
+
+                    // 1. Создаём новую таблицу
+                    logger.at(Level.INFO).log("Step 1: Creating new table structure...");
+                    stmt.execute(
+                            "CREATE TABLE claims_new (" +
+                                    "    dimension TEXT," +
+                                    "    chunkX INTEGER," +
+                                    "    chunkZ INTEGER," +
+                                    "    owner_id TEXT," +
+                                    "    owner_type TEXT DEFAULT 'PARTY'," +
+                                    "    created_user_uuid TEXT," +
+                                    "    created_user_name TEXT," +
+                                    "    created_date TEXT," +
+                                    "    PRIMARY KEY (dimension, chunkX, chunkZ)" +
+                                    ")"
+                    );
+                    logger.at(Level.INFO).log("  ✓ Table created");
+
+                    // 2. Копируем данные с УМНЫМ определением типа
+                    logger.at(Level.INFO).log("Step 2: Migrating data with smart type detection...");
+                    stmt.execute(
+                            "INSERT INTO claims_new " +
+                                    "    (dimension, chunkX, chunkZ, owner_id, owner_type, " +
+                                    "     created_user_uuid, created_user_name, created_date) " +
+                                    "SELECT " +
+                                    "    c.dimension, " +
+                                    "    c.chunkX, " +
+                                    "    c.chunkZ, " +
+                                    "    c.party_owner, " +
+                                    "    CASE " +
+                                    "        WHEN p.id IS NOT NULL THEN 'PARTY' " +
+                                    "        ELSE 'PERSONAL' " +
+                                    "    END as owner_type, " +
+                                    "    c.created_user_uuid, " +
+                                    "    c.created_user_name, " +
+                                    "    c.created_date " +
+                                    "FROM claims c " +
+                                    "LEFT JOIN parties p ON c.party_owner = p.id"
+                    );
+                    logger.at(Level.INFO).log("  ✓ Data migrated");
+
+                    // 3. Проверяем результаты миграции
+                    logger.at(Level.INFO).log("Step 3: Verifying migration results...");
+                    ResultSet typeStats = stmt.executeQuery(
+                            "SELECT owner_type, COUNT(*) as count " +
+                                    "FROM claims_new " +
+                                    "GROUP BY owner_type"
+                    );
+
+                    int partyCount = 0;
+                    int personalCount = 0;
+                    while (typeStats.next()) {
+                        String type = typeStats.getString("owner_type");
+                        int count = typeStats.getInt("count");
+                        if ("PARTY".equals(type)) {
+                            partyCount = count;
+                        } else if ("PERSONAL".equals(type)) {
+                            personalCount = count;
+                        }
+                        logger.at(Level.INFO).log("  - " + type + ": " + count + " claims");
+                    }
+
+                    // Проверка целостности
+                    int totalMigrated = partyCount + personalCount;
+                    if (totalMigrated != totalClaims) {
+                        logger.at(Level.WARNING).log("  ⚠ Warning: Claim count mismatch!");
+                        logger.at(Level.WARNING).log("    Before: " + totalClaims + ", After: " + totalMigrated);
+                    } else {
+                        logger.at(Level.INFO).log("  ✓ All claims migrated successfully");
+                    }
+
+                    // 4. Заменяем таблицы
+                    logger.at(Level.INFO).log("Step 4: Replacing old table...");
+                    stmt.execute("DROP TABLE claims");
+                    stmt.execute("ALTER TABLE claims_new RENAME TO claims");
+                    logger.at(Level.INFO).log("  ✓ Table replaced");
+
+                    logger.at(Level.INFO).log("============================================================");
+                    logger.at(Level.INFO).log("Migration completed successfully!");
+                    logger.at(Level.INFO).log("  PARTY claims:    " + partyCount);
+                    logger.at(Level.INFO).log("  PERSONAL claims: " + personalCount);
+                    logger.at(Level.INFO).log("============================================================");
+                }
+            }
+            // Если есть owner_id но нет owner_type - добавляем колонку
+            else if (hasOwnerId && !hasOwnerType) {
+                logger.at(Level.INFO).log("Adding owner_type column to claims table...");
+
+                try (Statement stmt = connection.createStatement()) {
+                    // Добавляем колонку
+                    stmt.execute("ALTER TABLE claims ADD COLUMN owner_type TEXT DEFAULT 'PARTY'");
+
+                    // УМНАЯ МИГРАЦИЯ: проверяем какие клаймы должны быть PERSONAL
+                    stmt.execute(
+                            "UPDATE claims " +
+                                    "SET owner_type = 'PERSONAL' " +
+                                    "WHERE owner_id NOT IN (SELECT id FROM parties)"
+                    );
+
+                    // Логируем результаты
+                    ResultSet typeStats = stmt.executeQuery(
+                            "SELECT owner_type, COUNT(*) as count " +
+                                    "FROM claims " +
+                                    "GROUP BY owner_type"
+                    );
+
+                    logger.at(Level.INFO).log("Updated owner_type. Claim types:");
+                    while (typeStats.next()) {
+                        logger.at(Level.INFO).log("  " + typeStats.getString("owner_type") +
+                                ": " + typeStats.getInt("count") + " claims");
+                    }
+                }
+
+                logger.at(Level.INFO).log("Successfully added owner_type column");
+            }
+            else if (hasOwnerId && hasOwnerType) {
+                logger.at(Level.INFO).log("Claims table already migrated (has owner_id and owner_type)");
+            }
+
+        } catch (SQLException e) {
+            logger.at(Level.SEVERE).log("Failed to migrate claims table: " + e.getMessage());
+            e.printStackTrace();
         }
     }
 
@@ -305,7 +471,7 @@ public class DatabaseManager {
                 ps.setString(1, partyId.toString());
                 ps.executeUpdate();
             }
-            // Cascading deletes should handle others if foreign keys are working, 
+            // Cascading deletes should handle others if foreign keys are working,
             // but SQLite requires PRAGMA foreign_keys = ON;
         } catch (SQLException e) {
             e.printStackTrace();
@@ -390,17 +556,22 @@ public class DatabaseManager {
         return parties;
     }
 
+    // ИСПРАВЛЕНО: Теперь сохраняет owner_id и owner_type
     public void saveClaim(String dimension, ChunkInfo chunk) {
-        try (PreparedStatement ps = connection.prepareStatement("REPLACE INTO claims (dimension, chunkX, chunkZ, party_owner, created_user_uuid, created_user_name, created_date) VALUES (?, ?, ?, ?, ?, ?, ?)")) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "REPLACE INTO claims (dimension, chunkX, chunkZ, owner_id, owner_type, created_user_uuid, created_user_name, created_date) " +
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)")) {
             ps.setString(1, dimension);
             ps.setInt(2, chunk.getChunkX());
             ps.setInt(3, chunk.getChunkZ());
-            ps.setString(4, chunk.getPartyOwner().toString());
-            ps.setString(5, chunk.getCreatedTracked().getUserUUID().toString());
-            ps.setString(6, chunk.getCreatedTracked().getUserName());
-            ps.setString(7, chunk.getCreatedTracked().getDate());
+            ps.setString(4, chunk.getOwnerId().toString()); // ИСПРАВЛЕНО: используем getOwnerId()
+            ps.setString(5, chunk.getOwnerType().name());   // ДОБАВЛЕНО: сохраняем тип владельца
+            ps.setString(6, chunk.getCreatedTracked().getUserUUID().toString());
+            ps.setString(7, chunk.getCreatedTracked().getUserName());
+            ps.setString(8, chunk.getCreatedTracked().getDate());
             ps.executeUpdate();
         } catch (SQLException e) {
+            logger.at(Level.SEVERE).log("Error saving claim: " + e.getMessage());
             e.printStackTrace();
         }
     }
@@ -416,25 +587,52 @@ public class DatabaseManager {
         }
     }
 
+    // ИСПРАВЛЕНО: Теперь загружает owner_id и owner_type
     public HashMap<String, HashMap<String, ChunkInfo>> loadClaims() {
         HashMap<String, HashMap<String, ChunkInfo>> claims = new HashMap<>();
         try (Statement statement = connection.createStatement();
              ResultSet rs = statement.executeQuery("SELECT * FROM claims")) {
             while (rs.next()) {
                 String dimension = rs.getString("dimension");
+
+                // ИСПРАВЛЕНО: Правильно загружаем owner_id и owner_type
+                UUID ownerId = UUID.fromString(rs.getString("owner_id"));
+                String ownerTypeStr = rs.getString("owner_type");
+                ClaimOwnerType ownerType;
+
+                // Обрабатываем случай когда owner_type отсутствует (старые записи)
+                if (ownerTypeStr == null || ownerTypeStr.isEmpty()) {
+                    ownerType = ClaimOwnerType.PARTY; // Дефолтное значение для старых записей
+                    logger.at(Level.WARNING).log("Chunk at " + rs.getInt("chunkX") + "," + rs.getInt("chunkZ") +
+                            " in " + dimension + " has no owner_type, defaulting to PARTY");
+                } else {
+                    try {
+                        ownerType = ClaimOwnerType.valueOf(ownerTypeStr);
+                    } catch (IllegalArgumentException e) {
+                        logger.at(Level.WARNING).log("Invalid owner_type '" + ownerTypeStr + "' for chunk at " +
+                                rs.getInt("chunkX") + "," + rs.getInt("chunkZ") + ", defaulting to PARTY");
+                        ownerType = ClaimOwnerType.PARTY;
+                    }
+                }
+
                 ChunkInfo chunk = new ChunkInfo(
-                        UUID.fromString(rs.getString("party_owner")),
+                        ownerId,
+                        ownerType,
                         rs.getInt("chunkX"),
                         rs.getInt("chunkZ")
                 );
+
                 chunk.setCreatedTracked(new ModifiedTracking(
                         UUID.fromString(rs.getString("created_user_uuid")),
                         rs.getString("created_user_name"),
                         rs.getString("created_date")
                 ));
-                claims.computeIfAbsent(dimension, k -> new HashMap<>()).put(ChunkInfo.formatCoordinates(chunk.getChunkX(), chunk.getChunkZ()), chunk);
+
+                claims.computeIfAbsent(dimension, k -> new HashMap<>())
+                        .put(ChunkInfo.formatCoordinates(chunk.getChunkX(), chunk.getChunkZ()), chunk);
             }
         } catch (SQLException e) {
+            logger.at(Level.SEVERE).log("Error loading claims: " + e.getMessage());
             e.printStackTrace();
         }
         return claims;

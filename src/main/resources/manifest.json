@@ -18,6 +18,6 @@
     "LuckPerms:LuckPerms": "*"
   },
   "DisabledByDefault": false,
-  "Main": "${entry_point}",
+  "Main": "com.buuz135.simpleclaims.Main",
   "IncludesAssetPack": true
 }
