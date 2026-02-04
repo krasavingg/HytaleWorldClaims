@@ -1,11 +1,14 @@
 package com.buuz135.simpleclaims.guild;
 
+import com.buuz135.simpleclaims.claim.ClaimManager;
+import com.hypixel.hytale.logger.HytaleLogger;
 import ru.hytaleworld.guild.util.Guild;
 import ru.hytaleworld.guild.util.GuildData;
 import ru.hytaleworld.guild.util.GuildManager;
 
 import javax.annotation.Nullable;
 import java.util.UUID;
+import java.util.logging.Level;
 
 /**
  * Мост между SimpleClaims и системой гильдий
@@ -25,6 +28,23 @@ public class GuildClaimBridge {
         }
         return guildManager.getPlayerGuild(playerId);
     }
+
+    /**
+     * Вызывается Guild plugin при расформировании гильдии
+     */
+    public static void onGuildDisbanded(UUID guildId) {
+        ClaimManager claimManager = ClaimManager.getInstance();
+
+        // Удаляем все клаймы гильдии синхронно
+        int removedCount = claimManager.removeAllGuildClaimsSync(guildId);
+
+        if (removedCount > 0) {
+            HytaleLogger.getLogger().at(Level.INFO).log(
+                    "Cleaned up " + removedCount + " claims for disbanded guild " + guildId
+            );
+        }
+    }
+
 
     /**
      * Получить гильдию по ID

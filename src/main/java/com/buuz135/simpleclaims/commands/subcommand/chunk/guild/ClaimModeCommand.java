@@ -17,8 +17,8 @@ import org.checkerframework.checker.nullness.compatqual.NonNullDecl;
 import com.buuz135.simpleclaims.claim.ClaimManager;
 import com.buuz135.simpleclaims.claim.party.PartyInfo;
 import ru.hytaleworld.guild.util.Guild;
+import ru.hytaleworld.guild.util.GuildManager;
 
-import java.awt.*;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
@@ -37,6 +37,7 @@ public class ClaimModeCommand extends AbstractAsyncCommand {
     private static class ShowModeVariant extends AbstractAsyncCommand {
         public ShowModeVariant() {
             super("Show current claim mode");
+            // НЕ используем requirePermission здесь - permission наследуется от родителя
         }
 
         @NonNullDecl
@@ -47,13 +48,16 @@ public class ClaimModeCommand extends AbstractAsyncCommand {
             if (!(sender instanceof Player player)) {
                 return CompletableFuture.completedFuture(null);
             }
-
             ClaimModeManager modeManager = ClaimModeManager.getInstance();
             ClaimManager claimManager = ClaimManager.getInstance();
-
             return CompletableFuture.runAsync(() -> {
                 showCurrentMode(player, modeManager, claimManager);
             });
+        }
+
+        @Override
+        protected boolean canGeneratePermission() {
+            return false; // Наследуем permission от родителя
         }
     }
 
@@ -172,7 +176,7 @@ public class ClaimModeCommand extends AbstractAsyncCommand {
                         if (!switched) {
                             // Если и это не удалось - возвращаемся к PERSONAL
                             modeManager.setMode(playerId, ClaimMode.PERSONAL);
-                            player.sendMessage(Message.raw(" Переключено на личный режим"));
+                            player.sendMessage(Message.raw("Переключено на личный режим"));
                             player.sendMessage(Message.raw("Вы не состоите в Party или гильдии"));
                         }
                     }

@@ -24,6 +24,8 @@ import ru.hytaleworld.guild.util.Guild;
 import javax.annotation.Nullable;
 import java.awt.*;
 import java.io.File;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
 import java.time.LocalDateTime;
 import java.util.*;
 import java.util.List;
@@ -67,35 +69,12 @@ public class ClaimManager {
         this.chunks = new HashMap<>();
         this.playerNameTracker = new PlayerNameTracker();
         this.adminOverrides = new HashSet<>();
-        this.databaseManager = new DatabaseManager(logger);
+        this.databaseManager = new DatabaseManager(logger,"10.130.0.13",5432,"hytale","omni_user","omni_pass");
         this.mapUpdateQueue = new HashMap<>();
 
         FileUtils.ensureMainDirectory();
 
         logger.at(Level.INFO).log("Loading simple claims data...");
-
-        if (this.databaseManager.isMigrationNecessary()) {
-            logger.at(Level.INFO).log("Migration needed, loading JSON files...");
-            PartyBlockingFile partyBlockingFile = new PartyBlockingFile();
-            ClaimedChunkBlockingFile claimedChunkBlockingFile = new ClaimedChunkBlockingFile();
-            PlayerNameTrackerBlockingFile playerNameTrackerBlockingFile = new PlayerNameTrackerBlockingFile();
-            AdminOverridesBlockingFile adminOverridesBlockingFile = new AdminOverridesBlockingFile();
-
-            if (new File(FileUtils.PARTY_PATH).exists()) {
-                FileUtils.loadWithBackup(partyBlockingFile::syncLoad, FileUtils.PARTY_PATH, logger);
-            }
-            if (new File(FileUtils.CLAIM_PATH).exists()) {
-                FileUtils.loadWithBackup(claimedChunkBlockingFile::syncLoad, FileUtils.CLAIM_PATH, logger);
-            }
-            if (new File(FileUtils.NAMES_CACHE_PATH).exists()) {
-                FileUtils.loadWithBackup(playerNameTrackerBlockingFile::syncLoad, FileUtils.NAMES_CACHE_PATH, logger);
-            }
-            if (new File(FileUtils.ADMIN_OVERRIDES_PATH).exists()) {
-                FileUtils.loadWithBackup(adminOverridesBlockingFile::syncLoad, FileUtils.ADMIN_OVERRIDES_PATH, logger);
-            }
-
-            this.databaseManager.migrate(partyBlockingFile, claimedChunkBlockingFile, playerNameTrackerBlockingFile, adminOverridesBlockingFile);
-        }
 
         logger.at(Level.INFO).log("Loading party data from DB...");
         this.parties.putAll(this.databaseManager.loadParties());
@@ -153,7 +132,6 @@ public class ClaimManager {
 
     public boolean isAllowedToInteract(UUID playerUUID, String dimension, int chunkX, int chunkZ, Predicate<PartyInfo> interactMethod) {
         if (playerUUID != null && adminOverrides.contains(playerUUID)) return true;
-
         var chunkInfo = getChunkRawCoords(dimension, chunkX, chunkZ);
         if (chunkInfo == null) return !Arrays.asList(Main.CONFIG.get().getFullWorldProtection()).contains(dimension);
 
@@ -848,6 +826,70 @@ public class ClaimManager {
         if (removedCount > 0) {
             logger.at(Level.INFO).log("Removed " + removedCount + " orphaned guild claims");
         }
+    }
+
+
+    /**
+     * Очистить чанки конкретной гильдии (синхронно)
+     * Вызывается из Guild plugin при расформировании
+     *
+     * @param guildId UUID гильдии
+     * @return количество удалённых чанков
+     */
+    public int removeAllGuildClaimsSync(UUID guildId) {
+        int removedCount = 0;
+
+        // Проходим по всем измерениям
+        for (String dimension : new HashSet<>(this.chunks.keySet())) {
+            var chunkMap = this.chunks.get(dimension);
+            if (chunkMap == null) continue;
+
+            // Получаем World для обновления карты
+            World world = Universe.get().getWorlds().get(dimension);
+
+            // Собираем чанки для удаления
+            List<ChunkInfo> toRemove = new ArrayList<>();
+
+            for (ChunkInfo chunkInfo : chunkMap.values()) {
+                // Проверяем только Guild-клаймы этой гильдии
+                if (chunkInfo.getOwnerType() == ClaimOwnerType.GUILD &&
+                        chunkInfo.getOwnerId().equals(guildId)) {
+                    toRemove.add(chunkInfo);
+                }
+            }
+
+            // Удаляем найденные чанки
+            for (ChunkInfo chunkInfo : toRemove) {
+                int chunkX = chunkInfo.getChunkX();
+                int chunkZ = chunkInfo.getChunkZ();
+
+                String key = ChunkInfo.formatCoordinates(chunkX, chunkZ);
+                chunkMap.remove(key);
+                databaseManager.deleteClaim(dimension, chunkX, chunkZ);
+
+                // ВАЖНО: Обновляем карту для игроков
+                if (world != null) {
+                    queueMapUpdate(world, chunkX, chunkZ);
+                }
+
+                removedCount++;
+
+                logger.at(Level.FINE).log("Removed guild claim at " + dimension + " [" + chunkX + ", " + chunkZ + "]");
+            }
+
+            // Помечаем мир как нуждающийся в обновлении
+            if (removedCount > 0 && world != null) {
+                setNeedsMapUpdate(dimension);
+            }
+        }
+
+        // Очищаем счётчик
+        if (removedCount > 0) {
+            guildClaimCounts.remove(guildId);
+            logger.at(Level.INFO).log("Removed " + removedCount + " claims for disbanded guild " + guildId);
+        }
+
+        return removedCount;
     }
 
 }

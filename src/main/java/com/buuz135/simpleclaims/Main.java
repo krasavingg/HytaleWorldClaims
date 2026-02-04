@@ -73,7 +73,7 @@ public class Main extends JavaPlugin {
         IWorldMapProvider.CODEC.register(SimpleClaimsWorldMapProvider.ID, SimpleClaimsWorldMapProvider.class, SimpleClaimsWorldMapProvider.CODEC);
         new ClaimModeManager();
         WindowPacketAdapters.install();
-        ClaimManager.getInstance();
+        ClaimManager instance = ClaimManager.getInstance();
 
         this.getEventRegistry().registerGlobal(AddWorldEvent.class, (event) -> {
             this.getLogger().at(Level.INFO).log("Registered world: " + event.getWorld().getName());

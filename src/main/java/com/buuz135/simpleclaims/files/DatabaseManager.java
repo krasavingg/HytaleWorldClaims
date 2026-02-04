@@ -22,29 +22,42 @@ public class DatabaseManager {
 
     private final HytaleLogger logger;
     private Connection connection;
+    private final String host;
+    private final int port;
+    private final String database;
+    private final String username;
+    private final String password;
 
-    public DatabaseManager(HytaleLogger logger) {
+    /**
+     * Конструктор для PostgreSQL
+     * @param logger Логгер
+     * @param host Хост PostgreSQL (например, "localhost")
+     * @param port Порт PostgreSQL (обычно 5432)
+     * @param database Имя базы данных
+     * @param username Имя пользователя
+     * @param password Пароль
+     */
+    public  DatabaseManager(HytaleLogger logger, String host, int port, String database, String username, String password) {
         this.logger = logger;
+        this.host = host;
+        this.port = port;
+        this.database = database;
+        this.username = username;
+        this.password = password;
 
         try {
-            Class.forName("org.sqlite.JDBC");
+            Class.forName("org.postgresql.Driver");
         } catch (Exception e) {
-            logger.at(Level.SEVERE).log("Couldn't find relocated JDBC driver for SQLite");
+            logger.at(Level.SEVERE).log("Couldn't find PostgreSQL JDBC driver");
         }
+
         FileUtils.ensureMainDirectory();
+
         try {
-            var sqliteFile = new File(FileUtils.DATABASE_PATH);
+            var jdbcUrl = String.format("jdbc:postgresql://%s:%d/%s?currentSchema=simpleclaimsguild", host, port, database);
+            this.connection = DriverManager.getConnection(jdbcUrl, username, password);
 
-            if (!sqliteFile.exists()) {
-                sqliteFile.createNewFile();
-            }
-
-            this.connection = DriverManager.getConnection("jdbc:sqlite:" + FileUtils.DATABASE_PATH);
-            try (Statement statement = connection.createStatement()) {
-                statement.execute("PRAGMA foreign_keys = ON;");
-            }
             createTables();
-            // ВАЖНО: Добавляем колонку owner_type если её нет
             ensureOwnerTypeColumn();
         } catch (Exception e) {
             logger.at(Level.SEVERE).log("Error initializing database: " + e.getMessage());
@@ -54,29 +67,32 @@ public class DatabaseManager {
 
     private void createTables() throws SQLException {
         try (Statement statement = connection.createStatement()) {
+            // Parties table
             statement.execute("CREATE TABLE IF NOT EXISTS parties (" +
-                    "id TEXT PRIMARY KEY," +
-                    "owner TEXT," +
+                    "id VARCHAR(36) PRIMARY KEY," +
+                    "owner VARCHAR(36)," +
                     "name TEXT," +
                     "description TEXT," +
                     "color INTEGER," +
-                    "created_user_uuid TEXT," +
+                    "created_user_uuid VARCHAR(36)," +
                     "created_user_name TEXT," +
                     "created_date TEXT," +
-                    "modified_user_uuid TEXT," +
+                    "modified_user_uuid VARCHAR(36)," +
                     "modified_user_name TEXT," +
                     "modified_date TEXT" +
                     ")");
 
+            // Party members table
             statement.execute("CREATE TABLE IF NOT EXISTS party_members (" +
-                    "party_id TEXT," +
-                    "member_uuid TEXT," +
+                    "party_id VARCHAR(36)," +
+                    "member_uuid VARCHAR(36)," +
                     "PRIMARY KEY (party_id, member_uuid)," +
                     "FOREIGN KEY (party_id) REFERENCES parties(id) ON DELETE CASCADE" +
                     ")");
 
+            // Party overrides table
             statement.execute("CREATE TABLE IF NOT EXISTS party_overrides (" +
-                    "party_id TEXT," +
+                    "party_id VARCHAR(36)," +
                     "type TEXT," +
                     "value_type TEXT," +
                     "value TEXT," +
@@ -84,49 +100,54 @@ public class DatabaseManager {
                     "FOREIGN KEY (party_id) REFERENCES parties(id) ON DELETE CASCADE" +
                     ")");
 
+            // Party allies table
             statement.execute("CREATE TABLE IF NOT EXISTS party_allies (" +
-                    "party_id TEXT," +
-                    "ally_party_id TEXT," +
+                    "party_id VARCHAR(36)," +
+                    "ally_party_id VARCHAR(36)," +
                     "PRIMARY KEY (party_id, ally_party_id)," +
                     "FOREIGN KEY (party_id) REFERENCES parties(id) ON DELETE CASCADE" +
                     ")");
 
+            // Player allies table
             statement.execute("CREATE TABLE IF NOT EXISTS player_allies (" +
-                    "party_id TEXT," +
-                    "player_uuid TEXT," +
+                    "party_id VARCHAR(36)," +
+                    "player_uuid VARCHAR(36)," +
                     "PRIMARY KEY (party_id, player_uuid)," +
                     "FOREIGN KEY (party_id) REFERENCES parties(id) ON DELETE CASCADE" +
                     ")");
 
-            // ИСПРАВЛЕНО: Добавлена колонка owner_type (будет добавлена в ensureOwnerTypeColumn если таблица уже существует)
+            // Claims table with owner_type support
             statement.execute("CREATE TABLE IF NOT EXISTS claims (" +
                     "dimension TEXT," +
                     "chunkX INTEGER," +
                     "chunkZ INTEGER," +
-                    "owner_id TEXT," +  // ПЕРЕИМЕНОВАНО: было party_owner
-                    "owner_type TEXT DEFAULT 'PARTY'," + // ДОБАВЛЕНО: тип владельца
-                    "created_user_uuid TEXT," +
+                    "owner_id VARCHAR(36)," +
+                    "owner_type VARCHAR(20) DEFAULT 'PARTY'," +
+                    "created_user_uuid VARCHAR(36)," +
                     "created_user_name TEXT," +
                     "created_date TEXT," +
                     "PRIMARY KEY (dimension, chunkX, chunkZ)" +
                     ")");
 
+            // Create index for faster queries
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_claims_owner ON claims(owner_id, owner_type)");
+
+            // Name cache table
             statement.execute("CREATE TABLE IF NOT EXISTS name_cache (" +
-                    "uuid TEXT PRIMARY KEY," +
+                    "uuid VARCHAR(36) PRIMARY KEY," +
                     "name TEXT," +
-                    "last_seen INTEGER DEFAULT -1" +
+                    "last_seen BIGINT DEFAULT -1" +
                     ")");
 
+            // Admin overrides table
             statement.execute("CREATE TABLE IF NOT EXISTS admin_overrides (" +
-                    "uuid TEXT PRIMARY KEY" +
+                    "uuid VARCHAR(36) PRIMARY KEY" +
                     ")");
-
-            addColumnIfNotExists("name_cache", "last_seen", "INTEGER DEFAULT " + System.currentTimeMillis());
         }
     }
 
     /**
-     * НОВЫЙ МЕТОД: Добавляет колонку owner_type если её нет и мигрирует party_owner -> owner_id
+     * Обеспечивает наличие колонки owner_type и мигрирует старые данные
      */
     private void ensureOwnerTypeColumn() {
         try {
@@ -134,79 +155,60 @@ public class DatabaseManager {
             boolean hasOwnerId = false;
             boolean hasPartyOwner = false;
 
-            // Проверяем какие колонки существуют
-            try (ResultSet rs = connection.getMetaData().getColumns(null, null, "claims", null)) {
+            // Проверяем существующие колонки
+            DatabaseMetaData metaData = connection.getMetaData();
+            try (ResultSet rs = metaData.getColumns(null, null, "claims", null)) {
                 while (rs.next()) {
-                    String columnName = rs.getString("COLUMN_NAME");
-                    if ("owner_type".equalsIgnoreCase(columnName)) {
+                    String columnName = rs.getString("COLUMN_NAME").toLowerCase();
+                    if ("owner_type".equals(columnName)) {
                         hasOwnerType = true;
                     }
-                    if ("owner_id".equalsIgnoreCase(columnName)) {
+                    if ("owner_id".equals(columnName)) {
                         hasOwnerId = true;
                     }
-                    if ("party_owner".equalsIgnoreCase(columnName)) {
+                    if ("party_owner".equals(columnName)) {
                         hasPartyOwner = true;
                     }
                 }
             }
 
-            // Если есть старая колонка party_owner, но нет новых - делаем УМНУЮ миграцию
+            // Миграция со старой схемы party_owner
             if (hasPartyOwner && !hasOwnerId) {
                 logger.at(Level.INFO).log("============================================================");
                 logger.at(Level.INFO).log("Starting claims table migration: party_owner → owner_id + owner_type");
                 logger.at(Level.INFO).log("============================================================");
 
                 try (Statement stmt = connection.createStatement()) {
-                    // Получаем статистику ДО миграции
+                    // Получаем статистику до миграции
                     ResultSet countBefore = stmt.executeQuery("SELECT COUNT(*) FROM claims");
+                    countBefore.next();
                     int totalClaims = countBefore.getInt(1);
                     logger.at(Level.INFO).log("Total claims to migrate: " + totalClaims);
 
-                    // 1. Создаём новую таблицу
-                    logger.at(Level.INFO).log("Step 1: Creating new table structure...");
-                    stmt.execute(
-                            "CREATE TABLE claims_new (" +
-                                    "    dimension TEXT," +
-                                    "    chunkX INTEGER," +
-                                    "    chunkZ INTEGER," +
-                                    "    owner_id TEXT," +
-                                    "    owner_type TEXT DEFAULT 'PARTY'," +
-                                    "    created_user_uuid TEXT," +
-                                    "    created_user_name TEXT," +
-                                    "    created_date TEXT," +
-                                    "    PRIMARY KEY (dimension, chunkX, chunkZ)" +
-                                    ")"
-                    );
-                    logger.at(Level.INFO).log("  ✓ Table created");
+                    // 1. Добавляем новые колонки
+                    logger.at(Level.INFO).log("Step 1: Adding new columns...");
+                    stmt.execute("ALTER TABLE claims ADD COLUMN owner_id VARCHAR(36)");
+                    stmt.execute("ALTER TABLE claims ADD COLUMN owner_type VARCHAR(20) DEFAULT 'PARTY'");
+                    logger.at(Level.INFO).log("  ✓ Columns added");
 
-                    // 2. Копируем данные с УМНЫМ определением типа
+                    // 2. Копируем данные с умным определением типа
                     logger.at(Level.INFO).log("Step 2: Migrating data with smart type detection...");
                     stmt.execute(
-                            "INSERT INTO claims_new " +
-                                    "    (dimension, chunkX, chunkZ, owner_id, owner_type, " +
-                                    "     created_user_uuid, created_user_name, created_date) " +
-                                    "SELECT " +
-                                    "    c.dimension, " +
-                                    "    c.chunkX, " +
-                                    "    c.chunkZ, " +
-                                    "    c.party_owner, " +
-                                    "    CASE " +
-                                    "        WHEN p.id IS NOT NULL THEN 'PARTY' " +
+                            "UPDATE claims c " +
+                                    "SET owner_id = c.party_owner, " +
+                                    "    owner_type = CASE " +
+                                    "        WHEN EXISTS (SELECT 1 FROM parties p WHERE p.id = c.party_owner) " +
+                                    "        THEN 'PARTY' " +
                                     "        ELSE 'PERSONAL' " +
-                                    "    END as owner_type, " +
-                                    "    c.created_user_uuid, " +
-                                    "    c.created_user_name, " +
-                                    "    c.created_date " +
-                                    "FROM claims c " +
-                                    "LEFT JOIN parties p ON c.party_owner = p.id"
+                                    "    END"
                     );
                     logger.at(Level.INFO).log("  ✓ Data migrated");
 
-                    // 3. Проверяем результаты миграции
+                    // 3. Проверяем результаты
                     logger.at(Level.INFO).log("Step 3: Verifying migration results...");
                     ResultSet typeStats = stmt.executeQuery(
                             "SELECT owner_type, COUNT(*) as count " +
-                                    "FROM claims_new " +
+                                    "FROM claims " +
                                     "GROUP BY owner_type"
                     );
 
@@ -232,11 +234,15 @@ public class DatabaseManager {
                         logger.at(Level.INFO).log("  ✓ All claims migrated successfully");
                     }
 
-                    // 4. Заменяем таблицы
-                    logger.at(Level.INFO).log("Step 4: Replacing old table...");
-                    stmt.execute("DROP TABLE claims");
-                    stmt.execute("ALTER TABLE claims_new RENAME TO claims");
-                    logger.at(Level.INFO).log("  ✓ Table replaced");
+                    // 4. Удаляем старую колонку
+                    logger.at(Level.INFO).log("Step 4: Removing old column...");
+                    stmt.execute("ALTER TABLE claims DROP COLUMN party_owner");
+                    logger.at(Level.INFO).log("  ✓ Old column removed");
+
+                    // 5. Делаем owner_id NOT NULL
+                    logger.at(Level.INFO).log("Step 5: Setting constraints...");
+                    stmt.execute("ALTER TABLE claims ALTER COLUMN owner_id SET NOT NULL");
+                    logger.at(Level.INFO).log("  ✓ Constraints set");
 
                     logger.at(Level.INFO).log("============================================================");
                     logger.at(Level.INFO).log("Migration completed successfully!");
@@ -245,15 +251,15 @@ public class DatabaseManager {
                     logger.at(Level.INFO).log("============================================================");
                 }
             }
-            // Если есть owner_id но нет owner_type - добавляем колонку
+            // Если есть owner_id но нет owner_type
             else if (hasOwnerId && !hasOwnerType) {
                 logger.at(Level.INFO).log("Adding owner_type column to claims table...");
 
                 try (Statement stmt = connection.createStatement()) {
                     // Добавляем колонку
-                    stmt.execute("ALTER TABLE claims ADD COLUMN owner_type TEXT DEFAULT 'PARTY'");
+                    stmt.execute("ALTER TABLE claims ADD COLUMN owner_type VARCHAR(20) DEFAULT 'PARTY'");
 
-                    // УМНАЯ МИГРАЦИЯ: проверяем какие клаймы должны быть PERSONAL
+                    // Умная миграция: проверяем какие клаймы должны быть PERSONAL
                     stmt.execute(
                             "UPDATE claims " +
                                     "SET owner_type = 'PERSONAL' " +
@@ -286,16 +292,6 @@ public class DatabaseManager {
         }
     }
 
-    private void addColumnIfNotExists(String tableName, String columnName, String columnDefinition) throws SQLException {
-        try (ResultSet rs = connection.getMetaData().getColumns(null, null, tableName, columnName)) {
-            if (!rs.next()) {
-                try (Statement statement = connection.createStatement()) {
-                    statement.execute("ALTER TABLE " + tableName + " ADD COLUMN " + columnName + " " + columnDefinition);
-                }
-            }
-        }
-    }
-
     public boolean isMigrationNecessary() {
         if (!new File(FileUtils.MAIN_PATH + File.separator + ".migrated").exists()) {
             return hasAnyJsonFile();
@@ -310,14 +306,16 @@ public class DatabaseManager {
                 new File(FileUtils.ADMIN_OVERRIDES_PATH).exists();
     }
 
-    public void migrate(PartyBlockingFile partyFile, ClaimedChunkBlockingFile chunkFile, PlayerNameTrackerBlockingFile nameFile, AdminOverridesBlockingFile adminFile) {
+    public void migrate(PartyBlockingFile partyFile, ClaimedChunkBlockingFile chunkFile,
+                        PlayerNameTrackerBlockingFile nameFile, AdminOverridesBlockingFile adminFile) {
         performMigration(partyFile, chunkFile, nameFile, adminFile);
     }
 
-    private void performMigration(PartyBlockingFile partyFile, ClaimedChunkBlockingFile chunkFile, PlayerNameTrackerBlockingFile nameFile, AdminOverridesBlockingFile adminFile) {
-        logger.at(Level.INFO).log("Starting migration to SQLite...");
+    private void performMigration(PartyBlockingFile partyFile, ClaimedChunkBlockingFile chunkFile,
+                                  PlayerNameTrackerBlockingFile nameFile, AdminOverridesBlockingFile adminFile) {
+        logger.at(Level.INFO).log("Starting migration to PostgreSQL...");
 
-        // Backup the entire folder
+        // Backup
         try {
             Path source = Paths.get(FileUtils.MAIN_PATH);
             Path backup = Paths.get(FileUtils.MAIN_PATH + "_backup_" + System.currentTimeMillis());
@@ -359,7 +357,7 @@ public class DatabaseManager {
 
             // Create migration marker
             new File(FileUtils.MAIN_PATH + File.separator + ".migrated").createNewFile();
-            logger.at(Level.INFO).log("Migration to SQLite completed successfully.");
+            logger.at(Level.INFO).log("Migration to PostgreSQL completed successfully.");
         } catch (Exception e) {
             try {
                 connection.rollback();
@@ -388,7 +386,24 @@ public class DatabaseManager {
 
     public void saveParty(PartyInfo party) {
         try {
-            PreparedStatement ps = connection.prepareStatement("REPLACE INTO parties (id, owner, name, description, color, created_user_uuid, created_user_name, created_date, modified_user_uuid, modified_user_name, modified_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            // PostgreSQL использует INSERT ... ON CONFLICT для upsert
+            PreparedStatement ps = connection.prepareStatement(
+                    "INSERT INTO parties (id, owner, name, description, color, " +
+                            "created_user_uuid, created_user_name, created_date, " +
+                            "modified_user_uuid, modified_user_name, modified_date) " +
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+                            "ON CONFLICT (id) DO UPDATE SET " +
+                            "owner = EXCLUDED.owner, " +
+                            "name = EXCLUDED.name, " +
+                            "description = EXCLUDED.description, " +
+                            "color = EXCLUDED.color, " +
+                            "created_user_uuid = EXCLUDED.created_user_uuid, " +
+                            "created_user_name = EXCLUDED.created_user_name, " +
+                            "created_date = EXCLUDED.created_date, " +
+                            "modified_user_uuid = EXCLUDED.modified_user_uuid, " +
+                            "modified_user_name = EXCLUDED.modified_user_name, " +
+                            "modified_date = EXCLUDED.modified_date"
+            );
             ps.setString(1, party.getId().toString());
             ps.setString(2, party.getOwner().toString());
             ps.setString(3, party.getName());
@@ -403,11 +418,13 @@ public class DatabaseManager {
             ps.executeUpdate();
 
             // Members
-            try (PreparedStatement deleteMembers = connection.prepareStatement("DELETE FROM party_members WHERE party_id = ?")) {
+            try (PreparedStatement deleteMembers = connection.prepareStatement(
+                    "DELETE FROM party_members WHERE party_id = ?")) {
                 deleteMembers.setString(1, party.getId().toString());
                 deleteMembers.executeUpdate();
             }
-            try (PreparedStatement insertMember = connection.prepareStatement("INSERT INTO party_members (party_id, member_uuid) VALUES (?, ?)")) {
+            try (PreparedStatement insertMember = connection.prepareStatement(
+                    "INSERT INTO party_members (party_id, member_uuid) VALUES (?, ?)")) {
                 for (UUID member : party.getMembers()) {
                     insertMember.setString(1, party.getId().toString());
                     insertMember.setString(2, member.toString());
@@ -417,11 +434,13 @@ public class DatabaseManager {
             }
 
             // Overrides
-            try (PreparedStatement deleteOverrides = connection.prepareStatement("DELETE FROM party_overrides WHERE party_id = ?")) {
+            try (PreparedStatement deleteOverrides = connection.prepareStatement(
+                    "DELETE FROM party_overrides WHERE party_id = ?")) {
                 deleteOverrides.setString(1, party.getId().toString());
                 deleteOverrides.executeUpdate();
             }
-            try (PreparedStatement insertOverride = connection.prepareStatement("INSERT INTO party_overrides (party_id, type, value_type, value) VALUES (?, ?, ?, ?)")) {
+            try (PreparedStatement insertOverride = connection.prepareStatement(
+                    "INSERT INTO party_overrides (party_id, type, value_type, value) VALUES (?, ?, ?, ?)")) {
                 for (PartyOverride override : party.getOverrides()) {
                     insertOverride.setString(1, party.getId().toString());
                     insertOverride.setString(2, override.getType());
@@ -433,11 +452,13 @@ public class DatabaseManager {
             }
 
             // Party Allies
-            try (PreparedStatement deleteAllies = connection.prepareStatement("DELETE FROM party_allies WHERE party_id = ?")) {
+            try (PreparedStatement deleteAllies = connection.prepareStatement(
+                    "DELETE FROM party_allies WHERE party_id = ?")) {
                 deleteAllies.setString(1, party.getId().toString());
                 deleteAllies.executeUpdate();
             }
-            try (PreparedStatement insertAlly = connection.prepareStatement("INSERT INTO party_allies (party_id, ally_party_id) VALUES (?, ?)")) {
+            try (PreparedStatement insertAlly = connection.prepareStatement(
+                    "INSERT INTO party_allies (party_id, ally_party_id) VALUES (?, ?)")) {
                 for (UUID ally : party.getPartyAllies()) {
                     insertAlly.setString(1, party.getId().toString());
                     insertAlly.setString(2, ally.toString());
@@ -447,11 +468,13 @@ public class DatabaseManager {
             }
 
             // Player Allies
-            try (PreparedStatement deletePAllies = connection.prepareStatement("DELETE FROM player_allies WHERE party_id = ?")) {
+            try (PreparedStatement deletePAllies = connection.prepareStatement(
+                    "DELETE FROM player_allies WHERE party_id = ?")) {
                 deletePAllies.setString(1, party.getId().toString());
                 deletePAllies.executeUpdate();
             }
-            try (PreparedStatement insertPAlly = connection.prepareStatement("INSERT INTO player_allies (party_id, player_uuid) VALUES (?, ?)")) {
+            try (PreparedStatement insertPAlly = connection.prepareStatement(
+                    "INSERT INTO player_allies (party_id, player_uuid) VALUES (?, ?)")) {
                 for (UUID ally : party.getPlayerAllies()) {
                     insertPAlly.setString(1, party.getId().toString());
                     insertPAlly.setString(2, ally.toString());
@@ -461,6 +484,7 @@ public class DatabaseManager {
             }
 
         } catch (SQLException e) {
+            logger.at(Level.SEVERE).log("Error saving party: " + e.getMessage());
             e.printStackTrace();
         }
     }
@@ -471,9 +495,8 @@ public class DatabaseManager {
                 ps.setString(1, partyId.toString());
                 ps.executeUpdate();
             }
-            // Cascading deletes should handle others if foreign keys are working,
-            // but SQLite requires PRAGMA foreign_keys = ON;
         } catch (SQLException e) {
+            logger.at(Level.SEVERE).log("Error deleting party: " + e.getMessage());
             e.printStackTrace();
         }
     }
@@ -504,7 +527,8 @@ public class DatabaseManager {
                 ));
 
                 // Load members
-                try (PreparedStatement ps = connection.prepareStatement("SELECT member_uuid FROM party_members WHERE party_id = ?")) {
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "SELECT member_uuid FROM party_members WHERE party_id = ?")) {
                     ps.setString(1, id.toString());
                     try (ResultSet rsMembers = ps.executeQuery()) {
                         List<UUID> members = new ArrayList<>();
@@ -516,20 +540,24 @@ public class DatabaseManager {
                 }
 
                 // Load overrides
-                try (PreparedStatement ps = connection.prepareStatement("SELECT * FROM party_overrides WHERE party_id = ?")) {
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "SELECT * FROM party_overrides WHERE party_id = ?")) {
                     ps.setString(1, id.toString());
                     try (ResultSet rsOverrides = ps.executeQuery()) {
                         while (rsOverrides.next()) {
                             party.setOverride(new PartyOverride(
                                     rsOverrides.getString("type"),
-                                    new PartyOverride.PartyOverrideValue(rsOverrides.getString("value_type"), rsOverrides.getString("value"))
+                                    new PartyOverride.PartyOverrideValue(
+                                            rsOverrides.getString("value_type"),
+                                            rsOverrides.getString("value"))
                             ));
                         }
                     }
                 }
 
                 // Load party allies
-                try (PreparedStatement ps = connection.prepareStatement("SELECT ally_party_id FROM party_allies WHERE party_id = ?")) {
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "SELECT ally_party_id FROM party_allies WHERE party_id = ?")) {
                     ps.setString(1, id.toString());
                     try (ResultSet rsAllies = ps.executeQuery()) {
                         while (rsAllies.next()) {
@@ -539,7 +567,8 @@ public class DatabaseManager {
                 }
 
                 // Load player allies
-                try (PreparedStatement ps = connection.prepareStatement("SELECT player_uuid FROM player_allies WHERE party_id = ?")) {
+                try (PreparedStatement ps = connection.prepareStatement(
+                        "SELECT player_uuid FROM player_allies WHERE party_id = ?")) {
                     ps.setString(1, id.toString());
                     try (ResultSet rsAllies = ps.executeQuery()) {
                         while (rsAllies.next()) {
@@ -551,21 +580,28 @@ public class DatabaseManager {
                 parties.put(id.toString(), party);
             }
         } catch (SQLException e) {
+            logger.at(Level.SEVERE).log("Error loading parties: " + e.getMessage());
             e.printStackTrace();
         }
         return parties;
     }
 
-    // ИСПРАВЛЕНО: Теперь сохраняет owner_id и owner_type
     public void saveClaim(String dimension, ChunkInfo chunk) {
         try (PreparedStatement ps = connection.prepareStatement(
-                "REPLACE INTO claims (dimension, chunkX, chunkZ, owner_id, owner_type, created_user_uuid, created_user_name, created_date) " +
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)")) {
+                "INSERT INTO claims (dimension, chunkX, chunkZ, owner_id, owner_type, " +
+                        "created_user_uuid, created_user_name, created_date) " +
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?) " +
+                        "ON CONFLICT (dimension, chunkX, chunkZ) DO UPDATE SET " +
+                        "owner_id = EXCLUDED.owner_id, " +
+                        "owner_type = EXCLUDED.owner_type, " +
+                        "created_user_uuid = EXCLUDED.created_user_uuid, " +
+                        "created_user_name = EXCLUDED.created_user_name, " +
+                        "created_date = EXCLUDED.created_date")) {
             ps.setString(1, dimension);
             ps.setInt(2, chunk.getChunkX());
             ps.setInt(3, chunk.getChunkZ());
-            ps.setString(4, chunk.getOwnerId().toString()); // ИСПРАВЛЕНО: используем getOwnerId()
-            ps.setString(5, chunk.getOwnerType().name());   // ДОБАВЛЕНО: сохраняем тип владельца
+            ps.setString(4, chunk.getOwnerId().toString());
+            ps.setString(5, chunk.getOwnerType().name());
             ps.setString(6, chunk.getCreatedTracked().getUserUUID().toString());
             ps.setString(7, chunk.getCreatedTracked().getUserName());
             ps.setString(8, chunk.getCreatedTracked().getDate());
@@ -577,17 +613,18 @@ public class DatabaseManager {
     }
 
     public void deleteClaim(String dimension, int chunkX, int chunkZ) {
-        try (PreparedStatement ps = connection.prepareStatement("DELETE FROM claims WHERE dimension = ? AND chunkX = ? AND chunkZ = ?")) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "DELETE FROM claims WHERE dimension = ? AND chunkX = ? AND chunkZ = ?")) {
             ps.setString(1, dimension);
             ps.setInt(2, chunkX);
             ps.setInt(3, chunkZ);
             ps.executeUpdate();
         } catch (SQLException e) {
+            logger.at(Level.SEVERE).log("Error deleting claim: " + e.getMessage());
             e.printStackTrace();
         }
     }
 
-    // ИСПРАВЛЕНО: Теперь загружает owner_id и owner_type
     public HashMap<String, HashMap<String, ChunkInfo>> loadClaims() {
         HashMap<String, HashMap<String, ChunkInfo>> claims = new HashMap<>();
         try (Statement statement = connection.createStatement();
@@ -595,22 +632,22 @@ public class DatabaseManager {
             while (rs.next()) {
                 String dimension = rs.getString("dimension");
 
-                // ИСПРАВЛЕНО: Правильно загружаем owner_id и owner_type
                 UUID ownerId = UUID.fromString(rs.getString("owner_id"));
                 String ownerTypeStr = rs.getString("owner_type");
                 ClaimOwnerType ownerType;
 
-                // Обрабатываем случай когда owner_type отсутствует (старые записи)
                 if (ownerTypeStr == null || ownerTypeStr.isEmpty()) {
-                    ownerType = ClaimOwnerType.PARTY; // Дефолтное значение для старых записей
-                    logger.at(Level.WARNING).log("Chunk at " + rs.getInt("chunkX") + "," + rs.getInt("chunkZ") +
-                            " in " + dimension + " has no owner_type, defaulting to PARTY");
+                    ownerType = ClaimOwnerType.PARTY;
+                    logger.at(Level.WARNING).log("Chunk at " + rs.getInt("chunkX") + "," +
+                            rs.getInt("chunkZ") + " in " + dimension +
+                            " has no owner_type, defaulting to PARTY");
                 } else {
                     try {
                         ownerType = ClaimOwnerType.valueOf(ownerTypeStr);
                     } catch (IllegalArgumentException e) {
-                        logger.at(Level.WARNING).log("Invalid owner_type '" + ownerTypeStr + "' for chunk at " +
-                                rs.getInt("chunkX") + "," + rs.getInt("chunkZ") + ", defaulting to PARTY");
+                        logger.at(Level.WARNING).log("Invalid owner_type '" + ownerTypeStr +
+                                "' for chunk at " + rs.getInt("chunkX") + "," + rs.getInt("chunkZ") +
+                                ", defaulting to PARTY");
                         ownerType = ClaimOwnerType.PARTY;
                     }
                 }
@@ -639,12 +676,15 @@ public class DatabaseManager {
     }
 
     public void saveNameCache(UUID uuid, String name, long lastSeen) {
-        try (PreparedStatement ps = connection.prepareStatement("REPLACE INTO name_cache (uuid, name, last_seen) VALUES (?, ?, ?)")) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "INSERT INTO name_cache (uuid, name, last_seen) VALUES (?, ?, ?) " +
+                        "ON CONFLICT (uuid) DO UPDATE SET name = EXCLUDED.name, last_seen = EXCLUDED.last_seen")) {
             ps.setString(1, uuid.toString());
             ps.setString(2, name);
             ps.setLong(3, lastSeen);
             ps.executeUpdate();
         } catch (SQLException e) {
+            logger.at(Level.SEVERE).log("Error saving name cache: " + e.getMessage());
             e.printStackTrace();
         }
     }
@@ -654,28 +694,37 @@ public class DatabaseManager {
         try (Statement statement = connection.createStatement();
              ResultSet rs = statement.executeQuery("SELECT * FROM name_cache")) {
             while (rs.next()) {
-                tracker.setPlayerName(UUID.fromString(rs.getString("uuid")), rs.getString("name"), rs.getLong("last_seen"));
+                tracker.setPlayerName(
+                        UUID.fromString(rs.getString("uuid")),
+                        rs.getString("name"),
+                        rs.getLong("last_seen")
+                );
             }
         } catch (SQLException e) {
+            logger.at(Level.SEVERE).log("Error loading name cache: " + e.getMessage());
             e.printStackTrace();
         }
         return tracker;
     }
 
     public void saveAdminOverride(UUID uuid) {
-        try (PreparedStatement ps = connection.prepareStatement("REPLACE INTO admin_overrides (uuid) VALUES (?)")) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "INSERT INTO admin_overrides (uuid) VALUES (?) ON CONFLICT (uuid) DO NOTHING")) {
             ps.setString(1, uuid.toString());
             ps.executeUpdate();
         } catch (SQLException e) {
+            logger.at(Level.SEVERE).log("Error saving admin override: " + e.getMessage());
             e.printStackTrace();
         }
     }
 
     public void deleteAdminOverride(UUID uuid) {
-        try (PreparedStatement ps = connection.prepareStatement("DELETE FROM admin_overrides WHERE uuid = ?")) {
+        try (PreparedStatement ps = connection.prepareStatement(
+                "DELETE FROM admin_overrides WHERE uuid = ?")) {
             ps.setString(1, uuid.toString());
             ps.executeUpdate();
         } catch (SQLException e) {
+            logger.at(Level.SEVERE).log("Error deleting admin override: " + e.getMessage());
             e.printStackTrace();
         }
     }
@@ -688,8 +737,24 @@ public class DatabaseManager {
                 overrides.add(UUID.fromString(rs.getString("uuid")));
             }
         } catch (SQLException e) {
+            logger.at(Level.SEVERE).log("Error loading admin overrides: " + e.getMessage());
             e.printStackTrace();
         }
         return overrides;
+    }
+
+    /**
+     * Закрывает соединение с базой данных
+     */
+    public void close() {
+        if (connection != null) {
+            try {
+                connection.close();
+                logger.at(Level.INFO).log("Database connection closed");
+            } catch (SQLException e) {
+                logger.at(Level.SEVERE).log("Error closing database connection: " + e.getMessage());
+                e.printStackTrace();
+            }
+        }
     }
 }
