@@ -69,7 +69,7 @@ public class ClaimManager {
         this.chunks = new HashMap<>();
         this.playerNameTracker = new PlayerNameTracker();
         this.adminOverrides = new HashSet<>();
-        this.databaseManager = new DatabaseManager(logger,"10.130.0.13",5432,"hytale","omni_user","omni_pass");
+        this.databaseManager = new DatabaseManager(logger,"158.160.136.215",5432,"hytale","omni_user","omni_pass");
         this.mapUpdateQueue = new HashMap<>();
 
         FileUtils.ensureMainDirectory();
